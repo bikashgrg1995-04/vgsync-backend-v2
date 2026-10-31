@@ -12,6 +12,7 @@ from rest_framework_simplejwt.views import (
 from .access import serialize_active_business
 from .serializers import (
     ChangePasswordSerializer,
+    LogoutSerializer,
     UserProfileSerializer,
     VGSyncTokenObtainPairSerializer,
     VGSyncTokenRefreshSerializer,
@@ -26,6 +27,28 @@ class LoginView(TokenObtainPairView):
 class RefreshTokenView(TokenRefreshView):
     permission_classes = [AllowAny]
     serializer_class = VGSyncTokenRefreshSerializer
+
+
+class LogoutView(APIView):
+    """
+    Revokes the given refresh token. It takes only the refresh token (no
+    access token), so a user whose access token has expired can still
+    sign out. Logging out twice is not an error.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            {"detail": "Logged out."},
+            status=status.HTTP_200_OK,
+        )
 
 
 class CurrentUserView(generics.RetrieveAPIView):

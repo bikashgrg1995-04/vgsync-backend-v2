@@ -1,14 +1,16 @@
 
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 
 from rest_framework import serializers
 
-from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import (
     TokenObtainPairSerializer,
     TokenRefreshSerializer,
 )
 from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.businesses.models import Business
 
@@ -18,6 +20,7 @@ from .access import (
     validate_user_access,
 )
 from .models import User
+from .tokens import revoke_all_refresh_tokens
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -280,12 +283,29 @@ class ChangePasswordSerializer(serializers.Serializer):
     def save(self, **kwargs):
         user = kwargs["user"]
 
-        user.set_password(self.validated_data["new_password"])
-        user.must_change_password = False
+        with transaction.atomic():
+            user.set_password(self.validated_data["new_password"])
+            user.must_change_password = False
 
-        user.save(update_fields=[
-            "password",
-            "must_change_password",
-        ])
+            user.save(update_fields=[
+                "password",
+                "must_change_password",
+            ])
+
+            # A password change signs the user out everywhere: every
+            # existing refresh token is revoked and they must log in again.
+            revoke_all_refresh_tokens(user)
 
         return user
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField()
+
+    def save(self, **kwargs):
+        try:
+            RefreshToken(self.validated_data["refresh"]).blacklist()
+        except TokenError:
+            # Expired, malformed or already blacklisted: there is nothing
+            # left to revoke, so logging out again is not an error.
+            pass
