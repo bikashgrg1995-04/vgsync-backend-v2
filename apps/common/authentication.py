@@ -6,6 +6,17 @@ from apps.accounts.access import AccessDenied, validate_user_access
 from apps.accounts.models import User
 from apps.businesses.models import Business
 
+from .exceptions import PasswordChangeRequired
+
+# Views a user may still call while ``must_change_password`` is set: reading
+# their own profile (so the client can see the flag) and changing the
+# password. Login, refresh and logout do not use this authentication class.
+# Everything else is blocked, so new endpoints are protected by default.
+PASSWORD_CHANGE_ALLOWED_VIEWS = frozenset({
+    "accounts:current-user",
+    "accounts:change-password",
+})
+
 
 class VGSyncJWTAuthentication(JWTAuthentication):
 
@@ -46,8 +57,27 @@ class VGSyncJWTAuthentication(JWTAuthentication):
         except AccessDenied as exc:
             raise AuthenticationFailed(exc.message)
 
+        # A user who must set a new password (for example after an admin
+        # reset) can do nothing else until they have changed it.
+        if (
+            user.must_change_password
+            and not self._is_password_change_view(request)
+        ):
+            raise PasswordChangeRequired()
+
         # Make the validated context available to API views and permissions.
         request.active_business = business
         request.access_mode = access_mode
 
         return user, token
+
+    @staticmethod
+    def _is_password_change_view(request):
+        # If the view cannot be determined the request is not allowed
+        # (fail closed).
+        match = getattr(request, "resolver_match", None)
+
+        return (
+            match is not None
+            and match.view_name in PASSWORD_CHANGE_ALLOWED_VIEWS
+        )

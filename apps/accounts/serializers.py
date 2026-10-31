@@ -276,6 +276,16 @@ class ChangePasswordSerializer(serializers.Serializer):
                 "confirm_password": "Passwords do not match."
             })
 
+        # Otherwise a user forced to change a temporary password could
+        # clear the flag by "changing" it to the same value.
+        if attrs["new_password"] == attrs["current_password"]:
+            raise serializers.ValidationError({
+                "new_password": (
+                    "The new password must be different from the "
+                    "current password."
+                )
+            })
+
         validate_password(attrs["new_password"], user=user)
 
         return attrs
