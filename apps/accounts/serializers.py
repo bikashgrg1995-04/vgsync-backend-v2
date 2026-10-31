@@ -12,6 +12,11 @@ from rest_framework_simplejwt.settings import api_settings
 
 from apps.businesses.models import Business
 
+from .access import (
+    AccessDenied,
+    serialize_active_business,
+    validate_user_access,
+)
 from .models import User
 
 
@@ -135,78 +140,13 @@ class VGSyncTokenObtainPairSerializer(TokenObtainPairSerializer):
                 {"detail": "Invalid business code or login credentials."}
             )
 
-        # 4. Validate the user's assigned scope.
-        if user.company_id:
+        # 4. Validate the user's scope, role and Position for this business.
+        try:
+            access_mode = validate_user_access(user, business)
+        except AccessDenied as exc:
+            raise serializers.ValidationError({"detail": exc.message})
 
-            if user.company_id != business.company_id:
-                raise serializers.ValidationError(
-                    {"detail": "You are not allowed to access this business."}
-                )
-
-            if user.role == User.Role.STAFF:
-                head_office = Business.objects.filter(
-                    company_id=user.company_id,
-                    business_type=Business.BusinessType.HEAD_OFFICE,
-                ).first()
-
-                if not head_office or business.id != head_office.id:
-                    raise serializers.ValidationError(
-                        {"detail": "Company Staff can only access Head Office."}
-                    )
-
-            elif user.role not in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-            ]:
-                raise serializers.ValidationError(
-                    {"detail": "You are not allowed to access this business."}
-                )
-
-        elif user.business_id:
-
-            if user.business_id != business.id:
-                raise serializers.ValidationError(
-                    {"detail": "You are not allowed to access this business."}
-                )
-
-        else:
-            raise serializers.ValidationError(
-                {"detail": "Invalid business code or login credentials."}
-            )
-
-        # 5. Staff must have an active, correctly scoped Position.
-        if user.role == User.Role.STAFF:
-
-            if not user.position_id or not user.position.is_active:
-                raise serializers.ValidationError(
-                    {"detail": "Your account does not have an active position."}
-                )
-
-            expected_position_business_id = (
-                user.business_id
-                if user.business_id
-                else Business.objects.filter(
-                    company_id=user.company_id,
-                    business_type=Business.BusinessType.HEAD_OFFICE,
-                ).values_list("id", flat=True).first()
-            )
-
-            if user.position.business_id != expected_position_business_id:
-                raise serializers.ValidationError(
-                    {"detail": "Your assigned position is invalid."}
-                )
-
-        # 6. Determine access mode.
-        access_mode = "full"
-
-        if (
-            user.company_id
-            and business.business_type == Business.BusinessType.BRANCH
-        ):
-            access_mode = "read_only"
-
-        # 7. Generate JWT with selected business context.
+        # 5. Generate JWT with selected business context.
         refresh = self.get_token(user)
 
         refresh["active_business_id"] = business.id
@@ -223,17 +163,10 @@ class VGSyncTokenObtainPairSerializer(TokenObtainPairSerializer):
             "refresh": str(refresh),
             "access": str(access),
             "user": UserProfileSerializer(user).data,
-            "active_business": {
-                "id": business.id,
-                "name": business.name,
-                "business_code": business.business_code,
-                "business_type": business.business_type,
-                "company_id": business.company_id,
-                "company_name": (
-                    business.company.name if business.company else None
-                ),
-                "access_mode": access_mode,
-            },
+            "active_business": serialize_active_business(
+                business,
+                access_mode,
+            ),
         }
 
 
@@ -288,115 +221,24 @@ class VGSyncTokenRefreshSerializer(TokenRefreshSerializer):
         business = (
             Business.objects
             .select_related("company")
-            .filter(
-                pk=active_business_id,
-                is_active=True,
-            )
+            .filter(pk=active_business_id)
             .first()
         )
 
-        if not business:
-            raise InvalidToken(
-                "The selected business is unavailable."
-            )
+        # 5. Revalidate business, company, tenant assignment, role and
+        #    Position against the current database state.
+        try:
+            access_mode = validate_user_access(user, business)
+        except AccessDenied as exc:
+            raise InvalidToken(exc.message)
 
-        # 5. Company must remain active.
-        if business.company_id and not business.company.is_active:
-            raise InvalidToken(
-                "The selected company is inactive."
-            )
-
-        # 6. Revalidate current tenant assignment.
-        if user.company_id:
-
-            if (
-                user.company_id != business.company_id
-                or user.tenant_company_id != user.company_id
-            ):
-                raise InvalidToken(
-                    "You are no longer authorized for this business."
-                )
-
-            if user.role == User.Role.STAFF:
-
-                if (
-                    business.business_type
-                    != Business.BusinessType.HEAD_OFFICE
-                ):
-                    raise InvalidToken(
-                        "Company Staff can only access Head Office."
-                    )
-
-            elif user.role not in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-            ]:
-                raise InvalidToken(
-                    "Your current role is not authorized."
-                )
-
-        elif user.business_id:
-
-            if (
-                user.business_id != business.id
-                or user.tenant_company_id != business.company_id
-            ):
-                raise InvalidToken(
-                    "You are no longer authorized for this business."
-                )
-
-            if user.role not in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-                User.Role.STAFF,
-            ]:
-                raise InvalidToken(
-                    "Your current role is not authorized."
-                )
-
-        else:
-            raise InvalidToken(
-                "Your account has no valid business assignment."
-            )
-
-        # 7. Staff must retain a valid active Position.
-        if user.role == User.Role.STAFF:
-
-            if not user.position_id or not user.position.is_active:
-                raise InvalidToken(
-                    "Your assigned position is no longer active."
-                )
-
-            expected_business_id = (
-                user.business_id
-                if user.business_id
-                else business.id
-            )
-
-            if user.position.business_id != expected_business_id:
-                raise InvalidToken(
-                    "Your assigned position is invalid."
-                )
-
-        # 8. Recalculate access mode from current database state.
-        access_mode = (
-            "read_only"
-            if (
-                user.company_id
-                and business.business_type == Business.BusinessType.BRANCH
-            )
-            else "full"
-        )
-
-        # 9. Update business context claims.
+        # 6. Update business context claims.
         refresh["active_business_code"] = business.business_code
         refresh["active_business_type"] = business.business_type
         refresh["active_company_id"] = business.company_id
         refresh["access_mode"] = access_mode
 
-        # 10. Pass the validated token to SimpleJWT.
+        # 7. Pass the validated token to SimpleJWT.
         attrs["refresh"] = str(refresh)
 
         return super().validate(attrs)
