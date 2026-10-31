@@ -17,6 +17,8 @@ env/
 *.sqlite3
 media/
 staticfiles/
+# Uploads written here before MEDIA_ROOT was configured
+/companies/
 
 # Testing
 .pytest_cache/
