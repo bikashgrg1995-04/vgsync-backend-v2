@@ -23,6 +23,9 @@ class ExpenseSerializer(serializers.ModelSerializer):
     payroll_payment = serializers.IntegerField(
         source="payroll_payment_id", read_only=True
     )
+    purchase_payment = serializers.IntegerField(
+        source="purchase_payment_id", read_only=True
+    )
 
     class Meta:
         model = Expense
@@ -35,6 +38,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
             "payment_method",
             "reference",
             "payroll_payment",
+            "purchase_payment",
             "status",
             "voided_at",
             "void_reason",
@@ -54,6 +58,11 @@ class ExpenseSerializer(serializers.ModelSerializer):
                 "Salary expenses are created by recording a payroll payment."
             )
 
+        if value == Expense.Category.PURCHASE:
+            raise serializers.ValidationError(
+                "Purchase expenses are created by paying a supplier."
+            )
+
         return value
 
     def validate_expense_date(self, value):
@@ -66,11 +75,11 @@ class ExpenseSerializer(serializers.ModelSerializer):
         instance = self.instance
 
         if instance is not None:
-            if instance.payroll_payment_id:
+            if instance.payroll_payment_id or instance.purchase_payment_id:
                 raise Conflict(
-                    "This is a salary payment. Void the payroll payment to "
-                    "remove it.",
-                    code="salary_expense_locked",
+                    "This expense comes from a payment. Void the payment "
+                    "to remove it.",
+                    code="payment_expense_locked",
                 )
 
             if instance.status != Expense.Status.ACTIVE:

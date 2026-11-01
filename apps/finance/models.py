@@ -5,13 +5,15 @@ from django.db.models import Q
 
 class Expense(models.Model):
     """
-    Money the business spent. Salary payments from the payroll app appear
-    here automatically (category ``salary``, read-only); other expenses are
+    Money the business spent. Salary payments from the payroll app and
+    supplier payments from the purchases app appear here automatically
+    (categories ``salary`` and ``purchase``, read-only); other expenses are
     entered by the owner. Nothing is deleted: a wrong expense is voided.
     """
 
     class Category(models.TextChoices):
         SALARY = "salary", "Salary"
+        PURCHASE = "purchase", "Purchase"
         RENT = "rent", "Rent"
         UTILITIES = "utilities", "Utilities"
         TRANSPORT = "transport", "Transport"
@@ -23,6 +25,7 @@ class Expense(models.Model):
         CASH = "cash", "Cash"
         BANK = "bank", "Bank transfer"
         ONLINE = "online", "Online"
+        CHEQUE = "cheque", "Cheque"
 
     class Status(models.TextChoices):
         ACTIVE = "active", "Active"
@@ -45,6 +48,15 @@ class Expense(models.Model):
     # Set only for salary expenses created from a payroll payment.
     payroll_payment = models.OneToOneField(
         "payroll.PayrollPayment",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="expense",
+    )
+
+    # Set only for purchase expenses created from a supplier payment.
+    purchase_payment = models.OneToOneField(
+        "purchases.PurchasePayment",
         on_delete=models.PROTECT,
         null=True,
         blank=True,
@@ -90,6 +102,10 @@ class Expense(models.Model):
             models.CheckConstraint(
                 condition=Q(payroll_payment__isnull=True) | Q(category="salary"),
                 name="expense_payroll_link_is_salary",
+            ),
+            models.CheckConstraint(
+                condition=Q(purchase_payment__isnull=True) | Q(category="purchase"),
+                name="expense_purchase_link_is_purchase",
             ),
         ]
 

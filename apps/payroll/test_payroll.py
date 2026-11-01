@@ -748,7 +748,7 @@ class ExpenseTests(PayrollTestCase):
         )
 
         self.assertEqual(patched.status_code, 409)
-        self.assertEqual(patched.data["code"], "salary_expense_locked")
+        self.assertEqual(patched.data["code"], "payment_expense_locked")
         self.assertEqual(voided.status_code, 409)
 
     def test_expense_rules(self):

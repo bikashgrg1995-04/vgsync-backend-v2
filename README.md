@@ -16,6 +16,7 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Payroll: monthly and daily pay, payments, advances, remaining and carried-over balances (owner only) | API |
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
+| Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments (needs the `purchases` permission) | API |
 | Company / business management APIs | Not yet implemented |
 | Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
@@ -39,7 +40,8 @@ apps/
   common/            JWT authentication class, permissions, throttling, pagination, shared errors
   inventory/         Inventory foundation (products, stock, transfers)
   payroll/           Pay setup, entries, payments and balances
-  finance/           Expenses (salary payments are added automatically)
+  purchases/         Suppliers, purchases, receiving stock and supplier payments
+  finance/           Expenses (salary and supplier payments are added automatically)
 ```
 
 ## Setup
@@ -339,9 +341,72 @@ Rules:
 - Deactivating someone first records salary due up to today; time spent inactive earns no monthly salary.
 - Hourly pay is not supported.
 
+## Purchases API
+
+Buying stock from suppliers, for the active business. It needs the `purchases` module permission (owner, admin and accountant have it by role; staff need it on their Position). Writes need full access to the business, so a company owner is read-only inside a branch. Money is sent and returned as strings.
+
+**Lifecycle**
+
+```
+draft  --receive-->  received          (stock goes up, once; the purchase is locked)
+draft  --cancel--->  cancelled         (no effect on stock)
+```
+
+A draft can be edited freely and has no effect on stock. `receive` adds every line to the business's stock through the inventory stock service (one `purchase_receipt` movement per line, referencing `PUR-000001`), all or nothing, and only once. A received purchase cannot be edited or cancelled; purchase returns will handle corrections.
+
+**Totals** are always calculated by the server from the lines, in this order (a total sent by a client is ignored):
+
+```
+line total = quantity x unit price
+subtotal   = sum of line totals
+taxable    = subtotal - discount_amount
+vat        = taxable x vat_rate / 100        (vat_rate defaults to 0)
+net total  = taxable + vat + freight_amount  (freight is not taxed)
+```
+
+Amounts are rounded to the paisa. The discount cannot exceed the subtotal.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/purchases/` | List (filters: `status`, `supplier`, `payment_status`, `purchase_date__gte`, `purchase_date__lte`, `search`) or create a draft |
+| `GET`, `PATCH` | `/purchases/{id}/` | View, or edit a draft. Sending `items` replaces all lines |
+| `POST` | `/purchases/{id}/receive/` | Goods arrived: add the lines to stock |
+| `POST` | `/purchases/{id}/cancel/` | Cancel a draft, with a `reason` |
+| `GET`, `POST` | `/purchases/payments/` | List or record a supplier payment (full or part, also before the goods arrive) |
+| `POST` | `/purchases/payments/{id}/void/` | Void a payment, with a `reason` |
+| `GET`, `POST` | `/purchases/suppliers/` | List or add suppliers |
+| `GET`, `PATCH`, `DELETE` | `/purchases/suppliers/{id}/` | View, edit or deactivate a supplier |
+
+Create a purchase:
+
+```json
+{
+  "supplier": 3,
+  "bill_no": "B-1042",
+  "purchase_date": "2026-11-02",
+  "discount_amount": "151.50",
+  "vat_rate": "13",
+  "freight_amount": "200.00",
+  "items": [
+    {"product": 12, "quantity": "10", "unit_price": "100.00"},
+    {"product": 15, "quantity": "3", "unit_price": "250.50"}
+  ]
+}
+```
+
+Each purchase also returns `paid_amount`, `remaining_amount` and `payment_status` (`unpaid`, `partial`, `paid`), all derived from its payments. Pay with `POST /purchases/payments/` and `{"purchase": 5, "amount": "400.00", "method": "cheque", "reference": "CHQ-9"}`; `method` is `cash`, `bank`, `online` or `cheque`. A payment cannot make the total paid exceed the net total. A supplier shows `total_purchased` and `outstanding` (received purchases not yet paid for) and `advance_paid` (paid on drafts still waiting for their goods).
+
+Rules:
+
+- Products come from the business's own catalog (a branch uses its Head Office's catalog) and must be active; the supplier must belong to the business and be active.
+- Purchase numbers run on within a business (`PUR-000001`). The same supplier `bill_no` cannot be entered twice unless the earlier one was cancelled.
+- Payments are never edited or deleted. Voiding one puts the amount back on the purchase and voids its `purchase` expense. A draft with payments cannot be cancelled until they are voided, and cannot be edited below what is already paid.
+- Product prices are not changed by purchases, and no sale price is derived from them.
+- Suppliers belong to one business. Purchases, suppliers and payments of one business are never visible to another.
+
 ## Expenses API (owner only)
 
-Every payroll payment is recorded as a `salary` expense automatically, so salary sits with all other spending. Other expenses are entered by the owner.
+Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -350,7 +415,7 @@ Every payroll payment is recorded as a `salary` expense automatically, so salary
 | `POST` | `/finance/expenses/{id}/void/` | Void a manual expense, with a reason |
 | `GET` | `/finance/expenses/summary/` | Totals of active expenses by category, for the same filters |
 
-Categories: `salary`, `rent`, `utilities`, `transport`, `marketing`, `maintenance`, `other`. Salary expenses are read-only here (`409`, `salary_expense_locked`); void the payroll payment instead. Expenses belong to the active business, so a company owner sees Head Office expenses and a branch owner sees the branch's.
+Categories: `salary`, `purchase`, `rent`, `utilities`, `transport`, `marketing`, `maintenance`, `other`. Salary and purchase expenses come from payments and are read-only here (`409`, `payment_expense_locked`); void the payment instead. Expenses belong to the active business, so a company owner sees Head Office expenses and a branch owner sees the branch's.
 
 ## Lists
 

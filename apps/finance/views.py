@@ -49,11 +49,11 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     def void(self, request, pk=None):
         expense = self.get_object()
 
-        if expense.payroll_payment_id:
+        if expense.payroll_payment_id or expense.purchase_payment_id:
             raise Conflict(
-                "This is a salary payment. Void the payroll payment to "
+                "This expense comes from a payment. Void the payment to "
                 "remove it.",
-                code="salary_expense_locked",
+                code="payment_expense_locked",
             )
 
         if expense.status != Expense.Status.ACTIVE:
