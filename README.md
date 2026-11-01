@@ -13,7 +13,8 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | JWT login, token refresh, current user, change password | API |
 | Owner account setup with forced password change at first login | Django Admin and API |
 | Team management: staff, roles, Positions and module permissions (owner only) | API |
-| Payroll: monthly, daily and hourly pay, records, mark paid, void (owner only) | API |
+| Payroll: monthly and daily pay, payments, advances, remaining and carried-over balances (owner only) | API |
+| Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Company / business management APIs | Not yet implemented |
 | Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
@@ -37,7 +38,8 @@ apps/
   businesses/        Business model (Head Office, Branch, Independent)
   common/            JWT authentication class, permissions, throttling, pagination, shared errors
   inventory/         Inventory foundation (products, stock, transfers)
-  payroll/           Salaries and payroll records
+  payroll/           Pay setup, entries, payments and balances
+  finance/           Expenses (salary payments are added automatically)
 ```
 
 ## Setup
@@ -288,42 +290,60 @@ Adding a person:
 
 ## Payroll API (owner only)
 
-Same scope rules as the team management API. Money is sent and returned as strings such as `"30000.00"`. The server calculates the net salary; any `net_salary` sent by a client is ignored.
+Same scope rules as the team management API. Money is sent and returned as strings such as `"30000.00"`.
 
-```
-basic salary = rate                    (monthly)
-             = rate x days worked      (daily)
-             = rate x hours worked     (hourly)
+Each person's pay is a running account. The business records what it **owes** (entries) and what it **paid** (payments); what is still owed is always worked out from the two, never typed in.
 
-net salary = basic salary + allowances + bonus - deductions - advance deduction
-```
+**Pay types**
 
-Each person has a **pay type** (`monthly`, `daily` or `hourly`) and a `rate` per month, day or hour. `allowances` is a fixed amount added to every record. `basic_salary` on a record is calculated by the server and cannot be sent.
+- **Monthly**: a fixed `rate` (plus `allowances`) falls due on the person's `salary_day` every month, from `start_date`. The system records each month's salary by itself when the day arrives; nothing needs to be run. Changing the rate affects future months only.
+- **Daily**: no fixed rate. The owner enters the amount earned for each day (a `wage` entry).
+
+**How "remaining" works**
+
+Everything earned (salary, wages, bonuses) is listed oldest first. Payments, plus deductions (money the business keeps back), are poured over it from the oldest amount to the newest. What stays unsettled is `remaining`. Unpaid amounts of earlier periods are never lost: they are shown as `previous_remaining` (the period starts on the latest salary day for monthly pay, and today for daily pay) and listed one by one in `unsettled` with `carried_over: true`. Paying more than is owed, or paying before the salary day, leaves an `advance`, which the next amount due uses up.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/payroll/salaries/` | Salaries of the team |
-| `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change one person's `pay_type`, `rate` and `allowances` |
-| `GET`, `POST` | `/payroll/records/` | List records (filters: `status`, `pay_type`, `staff`, `period_start__gte`, `paid_on__gte` and similar) or create one |
-| `GET`, `PATCH`, `DELETE` | `/payroll/records/{id}/` | View, edit or delete a **draft** |
-| `POST` | `/payroll/records/generate/` | Create a draft for every active person who has a salary, for a period |
-| `POST` | `/payroll/records/{id}/pay/` | Mark paid |
-| `POST` | `/payroll/records/{id}/void/` | Void a paid record, with a reason |
+| `GET` | `/payroll/salaries/` | How the team is paid (filter: `pay_type`) |
+| `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change `pay_type`, `rate`, `allowances`, `salary_day`, `start_date` |
+| `GET` | `/payroll/balances/` | Everyone's account, most owed first. Filters: `owing=true`, `advance=true`, `pay_type`, `search` |
+| `GET` | `/payroll/balances/{staff_id}/` | One person's account with each unsettled amount and recent payments |
+| `GET`, `POST` | `/payroll/entries/` | List (filters: `kind`, `staff`, `status`, `entry_date__gte`) or add a `wage`, `bonus` or `deduction` |
+| `PATCH` | `/payroll/entries/{id}/` | Change a wage, bonus or deduction |
+| `POST` | `/payroll/entries/{id}/void/` | Void an entry, with a reason |
+| `GET`, `POST` | `/payroll/payments/` | List or record a payment (full, part or advance) |
+| `POST` | `/payroll/payments/{id}/void/` | Void a payment, with a reason |
 
-Typical monthly flow:
+A balance contains `total_earned`, `total_deducted`, `total_paid`, `remaining`, `previous_remaining`, `current_remaining`, `advance`, `cycle_start`, `next_salary_date` and `last_payment_date`.
 
-1. Set each person's salary once with `PUT /payroll/salaries/{staff_id}/`.
-2. Each month call `POST /payroll/records/generate/` with `{"period_start": "2026-01-01", "period_end": "2026-01-31"}`. The response lists what was `created` and who was `skipped` (`no_salary` or `already_exists`).
-3. Adjust a draft with `PATCH` (`bonus`, `deductions`, `advance_deduction`, `notes`). For daily and hourly staff, enter the days or hours worked in `units` (for example `22` or `160.5`); a generated draft starts with `units` at 0.
-4. Pay with `POST .../pay/` and `{"payment_method": "cash", "paid_on": "2026-01-31", "payment_reference": "..."}`. The method is `cash`, `bank` or `online`; the date defaults to today and cannot be in the future.
+Typical use:
+
+1. Set up each person once: monthly `{"pay_type": "monthly", "rate": "30000.00", "allowances": "2000.00", "salary_day": 5}`, or daily `{"pay_type": "daily"}`.
+2. Daily staff: each day `POST /payroll/entries/` with `{"staff": 7, "kind": "wage", "entry_date": "2026-01-10", "amount": "850.00"}` (one wage per person per day; edit it to change the amount).
+3. Pay at any time with `POST /payroll/payments/` and `{"staff": 7, "amount": "12000.00", "method": "cash"}`. `method` is `cash`, `bank` or `online`; `paid_on` defaults to today and cannot be in the future.
+4. Check `GET /payroll/balances/?owing=true` to see who is still owed money.
 
 Rules:
 
-- `units` applies only to daily and hourly pay and cannot exceed the days (or 24 hours a day) in the period. A daily or hourly draft with no units cannot be paid (`409`, `units_required`).
-- A record keeps its own copy of the pay type, rate and amounts, so changing a salary later never changes past records.
-- A person cannot have two live records for overlapping periods.
-- A paid record is locked (`409`, `document_not_editable`). To correct it, void it with a reason and create a new one. Voided records stay on file with who voided them and why.
-- Deductions plus advance recovery cannot exceed the pay.
+- Monthly salary entries are created by the system and cannot be edited; void one and add a bonus or deduction to correct it.
+- Payments are never edited or deleted. A mistake is voided with a reason, which also voids its expense and puts the amount back on the balance.
+- Switching a person from monthly to daily (or back) starts the new type from today. Salary that was already due is recorded first.
+- Deactivating someone first records salary due up to today; time spent inactive earns no monthly salary.
+- Hourly pay is not supported.
+
+## Expenses API (owner only)
+
+Every payroll payment is recorded as a `salary` expense automatically, so salary sits with all other spending. Other expenses are entered by the owner.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/finance/expenses/` | List (filters: `category`, `status`, `payment_method`, `expense_date__gte`, `expense_date__lte`) or add an expense |
+| `GET`, `PATCH` | `/finance/expenses/{id}/` | View or change a manual expense |
+| `POST` | `/finance/expenses/{id}/void/` | Void a manual expense, with a reason |
+| `GET` | `/finance/expenses/summary/` | Totals of active expenses by category, for the same filters |
+
+Categories: `salary`, `rent`, `utilities`, `transport`, `marketing`, `maintenance`, `other`. Salary expenses are read-only here (`409`, `salary_expense_locked`); void the payroll payment instead. Expenses belong to the active business, so a company owner sees Head Office expenses and a branch owner sees the branch's.
 
 ## Lists
 
@@ -339,4 +359,4 @@ The settings use PostgreSQL, so the database user needs permission to create a t
 
 ## Django Admin
 
-Available at `/admin/` for Super Admin users to manage companies, businesses, users (including creating owners, see [Owner setup and first login](#owner-setup-and-first-login)), and Positions (module permissions are edited inline on each Position). Payroll records are read-only there; they are changed through the API so every change is validated and attributed.
+Available at `/admin/` for Super Admin users to manage companies, businesses, users (including creating owners, see [Owner setup and first login](#owner-setup-and-first-login)), and Positions (module permissions are edited inline on each Position). Payroll entries and payments are read-only there; they are changed through the API so every change is validated and attributed.

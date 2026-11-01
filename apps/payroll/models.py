@@ -1,30 +1,39 @@
+"""
+Staff pay as a running account.
+
+Money the business owes a person is recorded as **entries** (monthly
+salary, a day's wage, a bonus, a deduction). Money handed over is recorded
+as **payments** (a full or part payment, or an advance). What is still owed
+is always worked out from the two, never typed in, so it cannot drift.
+See ``services.py`` for how payments are matched to entries.
+"""
+
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.db.models import F, Q
+from django.db.models import Q
 
 MONEY = {"max_digits": 12, "decimal_places": 2}
-UNITS = {"max_digits": 7, "decimal_places": 2}
 ZERO = Decimal("0.00")
-CENT = Decimal("0.01")
 
 
 class PayType(models.TextChoices):
-    """How a person is paid; ``rate`` is per month, per day or per hour."""
-
     MONTHLY = "monthly", "Monthly"
     DAILY = "daily", "Daily"
-    HOURLY = "hourly", "Hourly"
 
 
 class SalaryProfile(models.Model):
     """
-    The agreed pay of one team member: a pay type and a rate (per month,
-    per day or per hour). It is the default used when payroll records are
-    created; changing it never alters past records, because each record
-    keeps its own copy of the amounts. ``allowances`` is a fixed amount
-    added to every record whatever the pay type.
+    How one team member is paid.
+
+    * **Monthly**: a fixed ``rate`` (plus ``allowances``) falls due on
+      ``salary_day`` of every month, starting from ``start_date``.
+    * **Daily**: nothing is fixed. The owner enters the amount earned for
+      each day as it happens.
+
+    Changing the rate never alters salary that has already fallen due,
+    because each month's entry keeps its own amount.
     """
 
     user = models.OneToOneField(
@@ -37,8 +46,16 @@ class SalaryProfile(models.Model):
         choices=PayType.choices,
         default=PayType.MONTHLY,
     )
-    rate = models.DecimalField(**MONEY)
+    # Monthly only; empty for daily pay.
+    rate = models.DecimalField(**MONEY, null=True, blank=True)
     allowances = models.DecimalField(**MONEY, default=ZERO)
+    # Day of the month salary falls due. Short months use their last day.
+    salary_day = models.PositiveSmallIntegerField(default=1)
+    # Salary falls due on or after this date.
+    start_date = models.DateField()
+    # Monthly salary has been recorded for every due date up to here. It
+    # stops moving while the person is inactive, so a gap is never paid.
+    accrued_through = models.DateField()
 
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -53,88 +70,62 @@ class SalaryProfile(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=Q(rate__gte=0) & Q(allowances__gte=0),
+                condition=Q(allowances__gte=0)
+                & (Q(rate__isnull=True) | Q(rate__gte=0)),
                 name="salary_profile_amounts_not_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(salary_day__gte=1, salary_day__lte=31),
+                name="salary_profile_day_in_month",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(pay_type="monthly", rate__isnull=False)
+                    | Q(pay_type="daily", rate__isnull=True)
+                ),
+                name="salary_profile_rate_matches_pay_type",
             ),
         ]
 
     def __str__(self):
-        return f"{self.user} - {self.rate} ({self.pay_type})"
+        return f"{self.user} ({self.pay_type})"
 
 
-class PayrollRecord(models.Model):
-    """
-    Pay for one team member for one period.
+class PayrollEntry(models.Model):
+    """An amount the business owes the person (or, for a deduction, takes off)."""
 
-    The net salary is always calculated on the server from the amounts on
-    the record. A paid record is locked; a mistake is corrected by voiding
-    it (with a reason) and creating a new one, so payment history is never
-    rewritten or deleted.
-    """
+    class Kind(models.TextChoices):
+        SALARY = "salary", "Monthly salary"
+        WAGE = "wage", "Daily wage"
+        BONUS = "bonus", "Bonus"
+        DEDUCTION = "deduction", "Deduction"
 
     class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        PAID = "paid", "Paid"
+        ACTIVE = "active", "Active"
         VOID = "void", "Void"
-
-    class PaymentMethod(models.TextChoices):
-        CASH = "cash", "Cash"
-        BANK = "bank", "Bank transfer"
-        ONLINE = "online", "Online"
 
     business = models.ForeignKey(
         "businesses.Business",
         on_delete=models.PROTECT,
-        related_name="payroll_records",
+        related_name="payroll_entries",
     )
     staff = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
-        related_name="payroll_records",
+        related_name="payroll_entries",
     )
-
-    period_start = models.DateField()
-    period_end = models.DateField()
-
-    pay_type = models.CharField(
-        max_length=10,
-        choices=PayType.choices,
-        default=PayType.MONTHLY,
-    )
-    rate = models.DecimalField(**MONEY, default=ZERO)
-    # Days or hours worked in the period. Empty for monthly pay.
-    units = models.DecimalField(**UNITS, null=True, blank=True)
-    # Calculated: the rate for monthly pay, otherwise rate x units.
-    basic_salary = models.DecimalField(**MONEY, editable=False, default=ZERO)
-    allowances = models.DecimalField(**MONEY, default=ZERO)
-    bonus = models.DecimalField(**MONEY, default=ZERO)
-    deductions = models.DecimalField(**MONEY, default=ZERO)
-    advance_deduction = models.DecimalField(**MONEY, default=ZERO)
-    net_salary = models.DecimalField(**MONEY, editable=False, default=ZERO)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    # The day the amount was earned (a wage) or fell due (a salary).
+    entry_date = models.DateField()
+    amount = models.DecimalField(**MONEY)
+    description = models.CharField(max_length=200, blank=True)
 
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
-        default=Status.DRAFT,
+        default=Status.ACTIVE,
     )
-
-    paid_on = models.DateField(null=True, blank=True)
-    payment_method = models.CharField(
-        max_length=10,
-        choices=PaymentMethod.choices,
-        blank=True,
-    )
-    payment_reference = models.CharField(max_length=100, blank=True)
-    notes = models.TextField(blank=True)
-
     created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="+",
-    )
-    paid_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
@@ -155,72 +146,102 @@ class PayrollRecord(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-period_start", "staff__username"]
+        ordering = ["-entry_date", "-id"]
         indexes = [
-            models.Index(fields=["business", "status", "period_start"]),
+            models.Index(fields=["staff", "status", "entry_date"]),
+            models.Index(fields=["business", "entry_date"]),
         ]
         constraints = [
             models.CheckConstraint(
-                condition=Q(period_end__gte=F("period_start")),
-                name="payroll_period_end_not_before_start",
+                condition=Q(amount__gt=0),
+                name="payroll_entry_amount_positive",
             ),
-            models.CheckConstraint(
-                condition=(
-                    Q(rate__gte=0)
-                    & Q(basic_salary__gte=0)
-                    & Q(allowances__gte=0)
-                    & Q(bonus__gte=0)
-                    & Q(deductions__gte=0)
-                    & Q(advance_deduction__gte=0)
-                    & Q(net_salary__gte=0)
-                ),
-                name="payroll_amounts_not_negative",
-            ),
-            models.CheckConstraint(
-                condition=Q(units__isnull=True) | Q(units__gte=0),
-                name="payroll_units_not_negative",
-            ),
-            models.CheckConstraint(
-                condition=Q(units__isnull=True) | ~Q(pay_type="monthly"),
-                name="payroll_monthly_has_no_units",
-            ),
-            # One live record per person per exact period. Overlaps are
-            # rejected by the serializer; this is the database backstop.
+            # Each month's salary is recorded once.
             models.UniqueConstraint(
-                fields=["staff", "period_start", "period_end"],
-                condition=~Q(status="void"),
-                name="unique_live_payroll_per_staff_period",
+                fields=["staff", "entry_date"],
+                condition=Q(kind="salary") & ~Q(status="void"),
+                name="unique_live_salary_per_due_date",
+            ),
+            # A day's wage is one entry; edit it to change the amount.
+            models.UniqueConstraint(
+                fields=["staff", "entry_date"],
+                condition=Q(kind="wage") & ~Q(status="void"),
+                name="unique_live_wage_per_day",
             ),
         ]
 
-    def calculate_basic(self):
-        if self.pay_type == PayType.MONTHLY:
-            return self.rate
+    def __str__(self):
+        return f"{self.staff} {self.kind} {self.entry_date} {self.amount}"
 
-        return (self.rate * (self.units or ZERO)).quantize(CENT)
 
-    def calculate_net(self):
-        return (
-            self.calculate_basic()
-            + self.allowances
-            + self.bonus
-            - self.deductions
-            - self.advance_deduction
-        )
+class PayrollPayment(models.Model):
+    """
+    Money paid to the person. It may be a full payment, a part payment, or an
+    advance paid before the amount is due. A payment is never edited or
+    deleted; a mistake is voided with a reason.
+    """
 
-    def save(self, *args, **kwargs):
-        self.basic_salary = self.calculate_basic()
-        self.net_salary = self.calculate_net()
+    class Method(models.TextChoices):
+        CASH = "cash", "Cash"
+        BANK = "bank", "Bank transfer"
+        ONLINE = "online", "Online"
 
-        update_fields = kwargs.get("update_fields")
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
 
-        if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {
-                "basic_salary",
-                "net_salary",
-            }
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="payroll_payments",
+    )
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="payroll_payments",
+    )
+    amount = models.DecimalField(**MONEY)
+    paid_on = models.DateField()
+    method = models.CharField(max_length=10, choices=Method.choices)
+    reference = models.CharField(max_length=100, blank=True)
+    notes = models.CharField(max_length=200, blank=True)
 
-        super().save(*args, **kwargs)
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    paid_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-paid_on", "-id"]
+        indexes = [
+            models.Index(fields=["staff", "status", "paid_on"]),
+            models.Index(fields=["business", "paid_on"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="payroll_payment_amount_positive",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.staff} {self.period_start}..{self.period_end}"
+        return f"{self.staff} paid {self.amount} on {self.paid_on}"

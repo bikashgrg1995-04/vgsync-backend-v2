@@ -1,14 +1,15 @@
+from decimal import Decimal
+
 from django.utils import timezone
 from rest_framework import serializers
 
 from apps.accounts.scope import scoped_users
-from apps.common.exceptions import Conflict
 
-from .models import PayrollRecord, PayType, SalaryProfile
-from .services import overlapping_records
+from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile
+from .services import first_accrued_through
 
 AMOUNT = {"max_digits": 12, "decimal_places": 2, "min_value": 0}
-UNITS = {"max_digits": 7, "decimal_places": 2, "min_value": 0}
+POSITIVE = {"max_digits": 12, "decimal_places": 2, "min_value": Decimal("0.01")}
 
 
 def staff_name(user):
@@ -22,20 +23,32 @@ class ScopedStaffField(serializers.PrimaryKeyRelatedField):
         return scoped_users(self.context["request"].active_business)
 
 
+# ---------------------------------------------------------------------------
+# Pay setup
+# ---------------------------------------------------------------------------
+
 class SalaryProfileSerializer(serializers.ModelSerializer):
     staff = serializers.IntegerField(source="user_id", read_only=True)
     staff_name = serializers.SerializerMethodField()
 
-    pay_type = serializers.ChoiceField(
-        choices=PayType.choices,
-        required=False,
-        default=PayType.MONTHLY,
-    )
+    pay_type = serializers.ChoiceField(choices=PayType.choices)
     rate = serializers.DecimalField(
         **AMOUNT,
-        help_text="Amount per month, per day or per hour, by pay type.",
+        required=False,
+        allow_null=True,
+        help_text="Monthly salary. Leave out for daily pay.",
     )
     allowances = serializers.DecimalField(**AMOUNT, required=False)
+    salary_day = serializers.IntegerField(
+        min_value=1,
+        max_value=31,
+        required=False,
+        help_text="Day of the month salary falls due (monthly pay).",
+    )
+    start_date = serializers.DateField(
+        required=False,
+        help_text="Salary falls due on or after this date. Defaults to today.",
+    )
 
     class Meta:
         model = SalaryProfile
@@ -45,6 +58,8 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
             "pay_type",
             "rate",
             "allowances",
+            "salary_day",
+            "start_date",
             "updated_at",
         )
         read_only_fields = ("updated_at",)
@@ -52,77 +67,90 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
     def get_staff_name(self, obj):
         return staff_name(obj.user)
 
+    def validate(self, attrs):
+        instance = self.instance
+        pay_type = attrs["pay_type"]
 
-class PayrollRecordSerializer(serializers.ModelSerializer):
+        if pay_type == PayType.MONTHLY:
+            rate = attrs.get("rate", instance.rate if instance else None)
+
+            if rate is None:
+                raise serializers.ValidationError(
+                    {"rate": "Monthly pay needs the monthly salary."}
+                )
+
+            attrs["rate"] = rate
+
+        else:
+            if attrs.get("rate") is not None:
+                raise serializers.ValidationError({
+                    "rate": (
+                        "Daily pay has no fixed rate. Enter the amount for "
+                        "each day instead."
+                    )
+                })
+
+            if attrs.get("allowances"):
+                raise serializers.ValidationError(
+                    {"allowances": "Allowances apply to monthly pay only."}
+                )
+
+            attrs["rate"] = None
+            attrs["allowances"] = 0
+
+        if instance is not None:
+            # Dates that already passed stay as they were recorded.
+            for locked in ("start_date",):
+                if locked in attrs and attrs[locked] != getattr(instance, locked):
+                    raise serializers.ValidationError(
+                        {locked: "Cannot be changed once pay is set up."}
+                    )
+
+        return attrs
+
+    def create(self, validated_data):
+        start = validated_data.setdefault("start_date", timezone.localdate())
+        validated_data["accrued_through"] = first_accrued_through(start)
+
+        return super().create(validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Entries and payments
+# ---------------------------------------------------------------------------
+
+class PayrollEntrySerializer(serializers.ModelSerializer):
     """
-    Read and write shape of a payroll record. ``net_salary`` and everything
-    about payment and voiding are read-only: totals are calculated here on
-    the server, and a record changes state only through ``pay`` and ``void``.
+    Create a daily wage, a bonus or a deduction. Monthly salary entries are
+    created by the system when the salary day arrives.
     """
 
-    staff = ScopedStaffField(required=True)
+    staff = ScopedStaffField()
     staff_name = serializers.SerializerMethodField()
-
-    # Optional on create: pay type, rate and allowances default to the
-    # staff member's salary. ``basic_salary`` is calculated, never sent.
-    pay_type = serializers.ChoiceField(choices=PayType.choices, required=False)
-    rate = serializers.DecimalField(**AMOUNT, required=False)
-    units = serializers.DecimalField(
-        **UNITS,
-        required=False,
-        allow_null=True,
-        help_text="Days or hours worked. Only for daily or hourly pay.",
-    )
-    allowances = serializers.DecimalField(**AMOUNT, required=False)
-    bonus = serializers.DecimalField(**AMOUNT, required=False)
-    deductions = serializers.DecimalField(**AMOUNT, required=False)
-    advance_deduction = serializers.DecimalField(**AMOUNT, required=False)
+    kind = serializers.ChoiceField(choices=PayrollEntry.Kind.choices)
+    amount = serializers.DecimalField(**POSITIVE)
 
     class Meta:
-        model = PayrollRecord
+        model = PayrollEntry
         fields = (
             "id",
             "staff",
             "staff_name",
-            "period_start",
-            "period_end",
-            "pay_type",
-            "rate",
-            "units",
-            "basic_salary",
-            "allowances",
-            "bonus",
-            "deductions",
-            "advance_deduction",
-            "net_salary",
+            "kind",
+            "entry_date",
+            "amount",
+            "description",
             "status",
-            "paid_on",
-            "payment_method",
-            "payment_reference",
-            "notes",
-            "paid_by",
-            "voided_by",
             "voided_at",
             "void_reason",
-            "created_by",
             "created_at",
-            "updated_at",
         )
         read_only_fields = (
             "id",
-            "basic_salary",
-            "net_salary",
             "status",
-            "paid_on",
-            "payment_method",
-            "payment_reference",
-            "paid_by",
-            "voided_by",
             "voided_at",
             "void_reason",
-            "created_by",
             "created_at",
-            "updated_at",
         )
 
     def get_staff_name(self, obj):
@@ -130,145 +158,109 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         instance = self.instance
+        kind = attrs.get("kind", instance.kind if instance else None)
 
         if instance is not None:
-            if instance.status != PayrollRecord.Status.DRAFT:
-                raise Conflict(
-                    "Only a draft can be edited. Void a paid record and "
-                    "create a new one to correct it.",
-                    code="document_not_editable",
+            if instance.status != PayrollEntry.Status.ACTIVE:
+                raise serializers.ValidationError("A void entry cannot be edited.")
+
+            if instance.kind == PayrollEntry.Kind.SALARY:
+                raise serializers.ValidationError(
+                    "Monthly salary is set by the system. Void it and add a "
+                    "bonus or deduction to correct it."
                 )
 
-            # Who and when are fixed once the record exists.
-            for locked in ("staff", "period_start", "period_end"):
+            for locked in ("staff", "kind"):
                 if locked in attrs and attrs[locked] != getattr(instance, locked):
                     raise serializers.ValidationError(
-                        {locked: "Cannot be changed. Delete the draft and create a new one."}
+                        {locked: "Cannot be changed. Void the entry and add a new one."}
                     )
+
+        if kind == PayrollEntry.Kind.SALARY:
+            raise serializers.ValidationError(
+                {"kind": "Monthly salary is added by the system."}
+            )
 
         staff = attrs.get("staff", instance.staff if instance else None)
-        period_start = attrs.get(
-            "period_start", instance.period_start if instance else None
-        )
-        period_end = attrs.get(
-            "period_end", instance.period_end if instance else None
-        )
+        profile = getattr(staff, "salary_profile", None)
 
-        if period_start is None or period_end is None:
+        if profile is None:
             raise serializers.ValidationError(
-                {"period_start": "Period start and end are required."}
+                {"staff": "Set this person's pay first."}
             )
 
-        if period_end < period_start:
+        if kind == PayrollEntry.Kind.WAGE and profile.pay_type != PayType.DAILY:
             raise serializers.ValidationError(
-                {"period_end": "Period end cannot be before period start."}
+                {"kind": "Daily wages are for staff on daily pay."}
             )
 
-        if instance is None:
-            if not staff.is_active:
-                raise serializers.ValidationError(
-                    {"staff": "This team member is inactive."}
-                )
+        if not staff.is_active:
+            raise serializers.ValidationError({"staff": "This team member is inactive."})
 
-            if overlapping_records(staff, period_start, period_end).exists():
+        entry_date = attrs.get("entry_date", instance.entry_date if instance else None)
+
+        if kind == PayrollEntry.Kind.WAGE:
+            clash = PayrollEntry.objects.filter(
+                staff=staff,
+                kind=PayrollEntry.Kind.WAGE,
+                entry_date=entry_date,
+                status=PayrollEntry.Status.ACTIVE,
+            )
+
+            if instance:
+                clash = clash.exclude(pk=instance.pk)
+
+            if clash.exists():
                 raise serializers.ValidationError({
-                    "period_start": (
-                        "This person already has payroll that overlaps this "
-                        "period. Void it first if it was a mistake."
+                    "entry_date": (
+                        "A wage is already entered for this day. Edit it "
+                        "instead."
                     )
                 })
 
-            # Pay defaults to the agreed salary.
-            profile = getattr(staff, "salary_profile", None)
-
-            if "rate" not in attrs:
-                if profile is None:
-                    raise serializers.ValidationError({
-                        "rate": (
-                            "Set a salary for this person first, or enter "
-                            "the pay type and rate."
-                        )
-                    })
-
-                attrs["rate"] = profile.rate
-
-                # The profile's pay type goes with its rate; a different
-                # type cannot reuse a rate meant for another unit.
-                if attrs.get("pay_type", profile.pay_type) != profile.pay_type:
-                    raise serializers.ValidationError(
-                        {"rate": "Enter the rate for this pay type."}
-                    )
-
-                attrs["pay_type"] = profile.pay_type
-
-            if "allowances" not in attrs and profile is not None:
-                attrs["allowances"] = profile.allowances
-
-        def current(name, default):
-            if name in attrs:
-                return attrs[name]
-
-            return getattr(instance, name) if instance else default
-
-        pay_type = current("pay_type", PayType.MONTHLY)
-        units = current("units", None)
-
-        if pay_type == PayType.MONTHLY:
-            if "units" not in attrs:
-                # Switching a draft to monthly drops the days or hours.
-                attrs["units"] = units = None
-
-            if units is not None:
-                raise serializers.ValidationError(
-                    {"units": "Units apply only to daily or hourly pay."}
-                )
-        else:
-            units = units or 0
-            attrs["units"] = units
-
-            days = (period_end - period_start).days + 1
-            limit = days if pay_type == PayType.DAILY else days * 24
-            noun = "days" if pay_type == PayType.DAILY else "hours"
-
-            if units > limit:
-                raise serializers.ValidationError({
-                    "units": f"More {noun} than the period has ({limit})."
-                })
-
-        # Check the result on the same figures the model will save.
-        probe = PayrollRecord(
-            pay_type=pay_type,
-            rate=current("rate", 0),
-            units=units,
-            allowances=current("allowances", 0),
-            bonus=current("bonus", 0),
-            deductions=current("deductions", 0),
-            advance_deduction=current("advance_deduction", 0),
-        )
-
-        if probe.calculate_net() < 0:
-            raise serializers.ValidationError({
-                "deductions": "Deductions and advance recovery cannot exceed the pay."
-            })
+        if entry_date and entry_date > timezone.localdate():
+            raise serializers.ValidationError(
+                {"entry_date": "The date cannot be in the future."}
+            )
 
         return attrs
 
     def create(self, validated_data):
         request = self.context["request"]
 
-        return PayrollRecord.objects.create(
+        return PayrollEntry.objects.create(
             business=request.active_business,
             created_by=request.user,
             **validated_data,
         )
 
 
-class PaySerializer(serializers.Serializer):
+class PayrollPaymentSerializer(serializers.ModelSerializer):
+    staff = ScopedStaffField()
+    staff_name = serializers.SerializerMethodField()
+    amount = serializers.DecimalField(**POSITIVE)
     paid_on = serializers.DateField(required=False)
-    payment_method = serializers.ChoiceField(choices=PayrollRecord.PaymentMethod.choices)
-    payment_reference = serializers.CharField(
-        required=False, allow_blank=True, max_length=100
-    )
+
+    class Meta:
+        model = PayrollPayment
+        fields = (
+            "id",
+            "staff",
+            "staff_name",
+            "amount",
+            "paid_on",
+            "method",
+            "reference",
+            "notes",
+            "status",
+            "voided_at",
+            "void_reason",
+            "created_at",
+        )
+        read_only_fields = ("id", "status", "voided_at", "void_reason", "created_at")
+
+    def get_staff_name(self, obj):
+        return staff_name(obj.staff)
 
     def validate_paid_on(self, value):
         if value > timezone.localdate():
@@ -276,19 +268,57 @@ class PaySerializer(serializers.Serializer):
 
         return value
 
+    def validate_staff(self, staff):
+        if getattr(staff, "salary_profile", None) is None:
+            raise serializers.ValidationError("Set this person's pay first.")
+
+        return staff
+
 
 class VoidSerializer(serializers.Serializer):
     reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
-class GenerateSerializer(serializers.Serializer):
-    period_start = serializers.DateField()
-    period_end = serializers.DateField()
+# ---------------------------------------------------------------------------
+# Balances (read-only; built from the figures in ``services.balance``)
+# ---------------------------------------------------------------------------
 
-    def validate(self, attrs):
-        if attrs["period_end"] < attrs["period_start"]:
-            raise serializers.ValidationError(
-                {"period_end": "Period end cannot be before period start."}
-            )
+class MoneyField(serializers.DecimalField):
+    def __init__(self, **kwargs):
+        super().__init__(max_digits=14, decimal_places=2, **kwargs)
 
-        return attrs
+
+class UnsettledEntrySerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    kind = serializers.CharField()
+    entry_date = serializers.DateField()
+    description = serializers.CharField(allow_blank=True)
+    amount = MoneyField()
+    paid = MoneyField()
+    remaining = MoneyField()
+    state = serializers.CharField()
+    carried_over = serializers.BooleanField()
+
+
+class BalanceSerializer(serializers.Serializer):
+    """Money is returned as strings, like everywhere else in the API."""
+
+    staff = serializers.IntegerField()
+    staff_name = serializers.CharField()
+    is_active = serializers.BooleanField()
+    pay_type = serializers.CharField()
+    total_earned = MoneyField()
+    total_deducted = MoneyField()
+    total_paid = MoneyField()
+    remaining = MoneyField()
+    previous_remaining = MoneyField()
+    current_remaining = MoneyField()
+    advance = MoneyField()
+    cycle_start = serializers.DateField()
+    next_salary_date = serializers.DateField(allow_null=True)
+    last_payment_date = serializers.DateField(allow_null=True)
+
+
+class BalanceDetailSerializer(BalanceSerializer):
+    unsettled = UnsettledEntrySerializer(many=True)
+    recent_payments = PayrollPaymentSerializer(many=True)

@@ -9,6 +9,7 @@ like every other API.
 
 from django.db import transaction
 from django.db.models import Count, Q
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -98,6 +99,15 @@ class StaffViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             if user.is_active:
+                # Record salary due up to today before the person stops
+                # earning it.
+                profile = getattr(user, "salary_profile", None)
+
+                if profile is not None:
+                    from apps.payroll.services import ensure_accruals
+
+                    ensure_accruals(profile)
+
                 user.is_active = False
                 user.save(update_fields=["is_active"])
 
@@ -122,6 +132,13 @@ class StaffViewSet(viewsets.ModelViewSet):
         if not user.is_active:
             user.is_active = True
             user.save(update_fields=["is_active"])
+
+            # Time spent inactive earns no monthly salary.
+            profile = getattr(user, "salary_profile", None)
+
+            if profile is not None:
+                profile.accrued_through = timezone.localdate()
+                profile.save(update_fields=["accrued_through"])
 
         return Response(StaffSerializer(user).data)
 

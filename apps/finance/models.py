@@ -1,0 +1,97 @@
+from django.conf import settings
+from django.db import models
+from django.db.models import Q
+
+
+class Expense(models.Model):
+    """
+    Money the business spent. Salary payments from the payroll app appear
+    here automatically (category ``salary``, read-only); other expenses are
+    entered by the owner. Nothing is deleted: a wrong expense is voided.
+    """
+
+    class Category(models.TextChoices):
+        SALARY = "salary", "Salary"
+        RENT = "rent", "Rent"
+        UTILITIES = "utilities", "Utilities"
+        TRANSPORT = "transport", "Transport"
+        MARKETING = "marketing", "Marketing"
+        MAINTENANCE = "maintenance", "Maintenance"
+        OTHER = "other", "Other"
+
+    class Method(models.TextChoices):
+        CASH = "cash", "Cash"
+        BANK = "bank", "Bank transfer"
+        ONLINE = "online", "Online"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="expenses",
+    )
+    category = models.CharField(max_length=20, choices=Category.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    expense_date = models.DateField()
+    description = models.CharField(max_length=200, blank=True)
+    payment_method = models.CharField(
+        max_length=10, choices=Method.choices, blank=True
+    )
+    reference = models.CharField(max_length=100, blank=True)
+
+    # Set only for salary expenses created from a payroll payment.
+    payroll_payment = models.OneToOneField(
+        "payroll.PayrollPayment",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="expense",
+    )
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-expense_date", "-id"]
+        indexes = [
+            models.Index(fields=["business", "status", "expense_date"]),
+            models.Index(fields=["business", "category"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="expense_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(payroll_payment__isnull=True) | Q(category="salary"),
+                name="expense_payroll_link_is_salary",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.category} {self.amount} on {self.expense_date}"

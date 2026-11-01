@@ -1,118 +1,302 @@
 """
-Payroll state changes. Views call these so the rules live in one place.
+Payroll rules in one place: when monthly salary falls due, how payments are
+matched to what is owed, and recording or voiding payments.
+
+How "remaining" is worked out
+-----------------------------
+Everything the person has earned (salary, daily wages, bonuses) is listed
+oldest first. Everything already given to them (payments, plus deductions,
+which are money the business keeps back) forms one pool. The pool is
+poured over the earnings from the oldest to the newest, so older amounts
+are settled first. What is left unsettled is the remaining amount; if the
+pool is bigger than all earnings, the surplus is an advance that the next
+amount due will absorb. Nothing is stored, so it cannot go out of date.
 """
+
+import calendar
+from datetime import date, timedelta
+from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
 
+from apps.businesses.models import Business
 from apps.common.exceptions import Conflict
 
-from .models import PayrollRecord, PayType, SalaryProfile
+from .models import (
+    PayrollEntry,
+    PayrollPayment,
+    PayType,
+    SalaryProfile,
+    ZERO,
+)
+
+EARNING_KINDS = (
+    PayrollEntry.Kind.SALARY,
+    PayrollEntry.Kind.WAGE,
+    PayrollEntry.Kind.BONUS,
+)
 
 
-def overlapping_records(staff, period_start, period_end, exclude=None):
-    """Live (not void) records of this person that overlap the period."""
-    records = PayrollRecord.objects.filter(
-        staff=staff,
-        period_start__lte=period_end,
-        period_end__gte=period_start,
-    ).exclude(status=PayrollRecord.Status.VOID)
+# ---------------------------------------------------------------------------
+# When monthly salary falls due
+# ---------------------------------------------------------------------------
 
-    if exclude is not None:
-        records = records.exclude(pk=exclude.pk)
+def due_date(year, month, salary_day):
+    """The salary day of a month; short months use their last day."""
+    last = calendar.monthrange(year, month)[1]
 
-    return records
+    return date(year, month, min(salary_day, last))
 
 
-@transaction.atomic
-def generate_drafts(*, business, staff_queryset, period_start, period_end, actor):
-    """
-    Create a draft for every active team member who has a salary and does
-    not already have a live record overlapping the period. Returns the
-    created records and a list of who was skipped and why.
-    """
-    created = []
-    skipped = []
+def due_dates(salary_day, after, upto):
+    """Every due date with ``after < date <= upto``, oldest first."""
+    year, month = after.year, after.month
+    dates = []
 
-    staff_list = (
-        staff_queryset
-        .filter(is_active=True)
-        .select_related("salary_profile")
-        .order_by("username")
+    while (year, month) <= (upto.year, upto.month):
+        due = due_date(year, month, salary_day)
+
+        if after < due <= upto:
+            dates.append(due)
+
+        month += 1
+
+        if month == 13:
+            year, month = year + 1, 1
+
+    return dates
+
+
+def payroll_business(user):
+    """The business whose books hold this person's pay."""
+    if user.business_id:
+        return user.business
+
+    return Business.objects.get(
+        company_id=user.company_id,
+        business_type=Business.BusinessType.HEAD_OFFICE,
     )
 
-    for staff in staff_list:
-        try:
-            profile = staff.salary_profile
-        except SalaryProfile.DoesNotExist:
-            skipped.append({"staff": staff.pk, "reason": "no_salary"})
-            continue
 
-        if overlapping_records(staff, period_start, period_end).exists():
-            skipped.append({"staff": staff.pk, "reason": "already_exists"})
-            continue
+def first_accrued_through(start_date):
+    return start_date - timedelta(days=1)
 
-        created.append(
-            PayrollRecord.objects.create(
-                business=business,
-                staff=staff,
-                period_start=period_start,
-                period_end=period_end,
-                pay_type=profile.pay_type,
-                rate=profile.rate,
-                # Days or hours are entered after the period, before paying.
-                units=None if profile.pay_type == PayType.MONTHLY else 0,
-                allowances=profile.allowances,
-                created_by=actor,
+
+@transaction.atomic
+def ensure_accruals(profile, today=None):
+    """
+    Record the monthly salary of every due date that has passed and is not
+    recorded yet. Safe to call as often as needed; it only fills the gap.
+    """
+    today = today or timezone.localdate()
+
+    profile = SalaryProfile.objects.select_for_update().select_related(
+        "user"
+    ).get(pk=profile.pk)
+
+    if profile.pay_type != PayType.MONTHLY or not profile.user.is_active:
+        return profile
+
+    if profile.accrued_through >= today:
+        return profile
+
+    business = payroll_business(profile.user)
+    amount = profile.rate + profile.allowances
+
+    for due in due_dates(profile.salary_day, profile.accrued_through, today):
+        if amount > 0:
+            PayrollEntry.objects.get_or_create(
+                staff=profile.user,
+                kind=PayrollEntry.Kind.SALARY,
+                entry_date=due,
+                status=PayrollEntry.Status.ACTIVE,
+                defaults={
+                    "business": business,
+                    "amount": amount,
+                    "description": f"Salary for {due:%B %Y}",
+                },
             )
+
+    profile.accrued_through = today
+    profile.save(update_fields=["accrued_through"])
+
+    return profile
+
+
+def current_cycle_start(profile, today):
+    """
+    Where "this period" begins. Anything dated earlier that is still unpaid
+    is carried over: for monthly pay the latest salary day, for daily pay
+    today.
+    """
+    if profile.pay_type == PayType.DAILY:
+        return today
+
+    dates = due_dates(
+        profile.salary_day,
+        first_accrued_through(profile.start_date),
+        today,
+    )
+
+    return dates[-1] if dates else today
+
+
+def next_salary_date(profile, today):
+    if profile.pay_type != PayType.MONTHLY:
+        return None
+
+    start = max(today, first_accrued_through(profile.start_date))
+    after = start
+
+    for _ in range(3):
+        upcoming = due_dates(
+            profile.salary_day,
+            after,
+            after + timedelta(days=62),
         )
 
-    return created, skipped
+        if upcoming:
+            return upcoming[0]
+
+        after += timedelta(days=62)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Matching payments to what is owed
+# ---------------------------------------------------------------------------
+
+def settle(entries, payments):
+    """
+    ``entries`` and ``payments`` are active rows of one person. Returns the
+    earning rows (oldest first) with ``paid`` and ``remaining`` set, and the
+    totals.
+    """
+    earnings = sorted(
+        (e for e in entries if e.kind in EARNING_KINDS),
+        key=lambda e: (e.entry_date, e.id),
+    )
+    deducted = sum(
+        (e.amount for e in entries if e.kind == PayrollEntry.Kind.DEDUCTION),
+        ZERO,
+    )
+    paid_total = sum((p.amount for p in payments), ZERO)
+
+    pool = paid_total + deducted
+
+    for entry in earnings:
+        applied = min(entry.amount, pool)
+        entry.paid = applied
+        entry.remaining = entry.amount - applied
+        pool -= applied
+
+    earned = sum((e.amount for e in earnings), ZERO)
+
+    return earnings, {
+        "earned": earned,
+        "deducted": deducted,
+        "paid": paid_total,
+        "remaining": sum((e.remaining for e in earnings), ZERO),
+        "advance": pool,
+    }
+
+
+def entry_state(entry):
+    if entry.remaining == 0:
+        return "paid"
+
+    return "partial" if entry.paid > 0 else "unpaid"
+
+
+def balance(profile, entries, payments, today):
+    """Everything the owner wants to know about one person's account."""
+    earnings, totals = settle(entries, payments)
+    start = current_cycle_start(profile, today)
+
+    previous = sum(
+        (e.remaining for e in earnings if e.entry_date < start), ZERO
+    )
+
+    for entry in earnings:
+        entry.state = entry_state(entry)
+        entry.carried_over = entry.remaining > 0 and entry.entry_date < start
+
+    last_payment = max((p.paid_on for p in payments), default=None)
+
+    return {
+        "earnings": earnings,
+        "pay_type": profile.pay_type,
+        "total_earned": totals["earned"],
+        "total_deducted": totals["deducted"],
+        "total_paid": totals["paid"],
+        "remaining": totals["remaining"],
+        "previous_remaining": previous,
+        "current_remaining": totals["remaining"] - previous,
+        "advance": totals["advance"],
+        "cycle_start": start,
+        "next_salary_date": next_salary_date(profile, today),
+        "last_payment_date": last_payment,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recording and voiding
+# ---------------------------------------------------------------------------
+
+@transaction.atomic
+def create_payment(*, staff, business, actor, amount, paid_on, method,
+                   reference="", notes=""):
+    from apps.finance.services import record_salary_expense
+
+    payment = PayrollPayment.objects.create(
+        business=business,
+        staff=staff,
+        amount=amount,
+        paid_on=paid_on,
+        method=method,
+        reference=reference,
+        notes=notes,
+        paid_by=actor,
+    )
+
+    record_salary_expense(payment)
+
+    return payment
 
 
 @transaction.atomic
-def mark_paid(*, record, actor, paid_on, payment_method, payment_reference=""):
-    record = PayrollRecord.objects.select_for_update().get(pk=record.pk)
+def void_payment(*, payment, actor, reason):
+    from apps.finance.services import void_salary_expense
 
-    if record.status != PayrollRecord.Status.DRAFT:
-        raise Conflict(
-            f"Only a draft can be paid; this record is {record.status}.",
-            code="invalid_status",
-        )
+    payment = PayrollPayment.objects.select_for_update().get(pk=payment.pk)
 
-    if record.pay_type != PayType.MONTHLY and not record.units:
-        unit = "days" if record.pay_type == PayType.DAILY else "hours"
+    if payment.status != PayrollPayment.Status.ACTIVE:
+        raise Conflict("This payment is already void.", code="invalid_status")
 
-        raise Conflict(
-            f"Enter the {unit} worked before paying. Delete the draft if "
-            "there is nothing to pay.",
-            code="units_required",
-        )
+    payment.status = PayrollPayment.Status.VOID
+    payment.voided_by = actor
+    payment.voided_at = timezone.now()
+    payment.void_reason = reason
+    payment.save(update_fields=["status", "voided_by", "voided_at", "void_reason"])
 
-    record.status = PayrollRecord.Status.PAID
-    record.paid_on = paid_on
-    record.payment_method = payment_method
-    record.payment_reference = payment_reference
-    record.paid_by = actor
-    record.save()
+    void_salary_expense(payment, actor, reason)
 
-    return record
+    return payment
 
 
 @transaction.atomic
-def void_record(*, record, actor, reason):
-    record = PayrollRecord.objects.select_for_update().get(pk=record.pk)
+def void_entry(*, entry, actor, reason):
+    entry = PayrollEntry.objects.select_for_update().get(pk=entry.pk)
 
-    if record.status != PayrollRecord.Status.PAID:
-        raise Conflict(
-            "Only a paid record can be voided. Delete a draft instead.",
-            code="invalid_status",
-        )
+    if entry.status != PayrollEntry.Status.ACTIVE:
+        raise Conflict("This entry is already void.", code="invalid_status")
 
-    record.status = PayrollRecord.Status.VOID
-    record.voided_by = actor
-    record.voided_at = timezone.now()
-    record.void_reason = reason
-    record.save()
+    entry.status = PayrollEntry.Status.VOID
+    entry.voided_by = actor
+    entry.voided_at = timezone.now()
+    entry.void_reason = reason
+    entry.save(update_fields=["status", "voided_by", "voided_at", "void_reason"])
 
-    return record
+    return entry
