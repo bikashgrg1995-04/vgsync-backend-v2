@@ -247,6 +247,90 @@ class VGSyncTokenRefreshSerializer(TokenRefreshSerializer):
         return super().validate(attrs)
 
 
+class BusinessContextSwitchSerializer(serializers.Serializer):
+    refresh = serializers.CharField(write_only=True)
+    business_id = serializers.IntegerField(min_value=1)
+
+    @transaction.atomic
+    def validate(self, attrs):
+        request = self.context["request"]
+        user = request.user
+
+        # 1. Validate the supplied refresh token.
+        try:
+            current_refresh = RefreshToken(attrs["refresh"])
+        except (TokenError, InvalidToken):
+            raise serializers.ValidationError({
+                "refresh": "Invalid, expired or revoked refresh token."
+            })
+
+        # 2. The refresh token must belong to the authenticated user.
+        token_user_id = current_refresh.get(api_settings.USER_ID_CLAIM)
+
+        if str(token_user_id) != str(user.pk):
+            raise serializers.ValidationError({
+                "refresh": (
+                    "This refresh token does not belong to your account."
+                )
+            })
+
+        # 3. The refresh token must match the current business context.
+        token_business_id = current_refresh.get("active_business_id")
+
+        if str(token_business_id) != str(request.active_business.pk):
+            raise serializers.ValidationError({
+                "refresh": (
+                    "The refresh token does not match your current "
+                    "business context. Please log in again."
+                )
+            })
+
+        # 4. Fetch the target business.
+        business = (
+            Business.objects
+            .select_related("company")
+            .filter(pk=attrs["business_id"])
+            .first()
+        )
+
+        if not business:
+            raise serializers.ValidationError({
+                "business_id": "The selected business is unavailable."
+            })
+
+        # 5. Revalidate tenant, role, Position and business access.
+        try:
+            access_mode = validate_user_access(user, business)
+        except AccessDenied as exc:
+            raise serializers.ValidationError({
+                "business_id": exc.message
+            })
+
+        # 6. Revoke the current refresh token.
+        current_refresh.blacklist()
+
+        # 7. Issue a new refresh token with the target business context.
+        refresh = VGSyncTokenObtainPairSerializer.get_token(user)
+
+        refresh["active_business_id"] = business.id
+        refresh["active_business_code"] = business.business_code
+        refresh["active_business_type"] = business.business_type
+        refresh["active_company_id"] = business.company_id
+        refresh["access_mode"] = access_mode
+
+        access = refresh.access_token
+
+        return {
+            "refresh": str(refresh),
+            "access": str(access),
+            "user": UserProfileSerializer(user).data,
+            "active_business": serialize_active_business(
+                business,
+                access_mode,
+            ),
+        }
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(
         write_only=True,
