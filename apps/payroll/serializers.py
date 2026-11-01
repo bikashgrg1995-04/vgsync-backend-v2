@@ -322,3 +322,19 @@ class BalanceSerializer(serializers.Serializer):
 class BalanceDetailSerializer(BalanceSerializer):
     unsettled = UnsettledEntrySerializer(many=True)
     recent_payments = PayrollPaymentSerializer(many=True)
+
+
+class StatementRowSerializer(serializers.Serializer):
+    """One line of a person's statement; see ``services.statement``."""
+
+    id = serializers.IntegerField()
+    date = serializers.DateField()
+    type = serializers.CharField()
+    direction = serializers.CharField()
+    description = serializers.CharField(allow_blank=True)
+    amount = MoneyField()
+    method = serializers.CharField(allow_blank=True)
+    reference = serializers.CharField(allow_blank=True)
+    advance_part = MoneyField()
+    owed_after = MoneyField()
+    advance_after = MoneyField()

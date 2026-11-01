@@ -309,11 +309,18 @@ Everything earned (salary, wages, bonuses) is listed oldest first. Payments, plu
 | `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change `pay_type`, `rate`, `allowances`, `salary_day`, `start_date` |
 | `GET` | `/payroll/balances/` | Everyone's account, most owed first. Filters: `owing=true`, `advance=true`, `pay_type`, `search` |
 | `GET` | `/payroll/balances/{staff_id}/` | One person's account with each unsettled amount and recent payments |
+| `GET` | `/payroll/balances/{staff_id}/statement/` | Statement: every amount earned, deducted and paid, newest first, each with what was still owed (`owed_after`) or paid ahead (`advance_after`) right after it. Filters: `date_from`, `date_to` |
+| `GET` | `/payroll/me/` | **Any signed-in person:** their own account (the salary tracker) |
+| `GET` | `/payroll/me/statement/` | **Any signed-in person:** their own statement |
 | `GET`, `POST` | `/payroll/entries/` | List (filters: `kind`, `staff`, `status`, `entry_date__gte`) or add a `wage`, `bonus` or `deduction` |
 | `PATCH` | `/payroll/entries/{id}/` | Change a wage, bonus or deduction |
 | `POST` | `/payroll/entries/{id}/void/` | Void an entry, with a reason |
 | `GET`, `POST` | `/payroll/payments/` | List or record a payment (full, part or advance) |
 | `POST` | `/payroll/payments/{id}/void/` | Void a payment, with a reason |
+
+A payment line in a statement carries its `date`, `amount`, `method`, `reference` and `advance_part` (the part paid before anything was owed), so an advance shows how much was paid, when, and what is left. Recording a payment also returns `balance_after` (`remaining` and `advance`).
+
+The two `/payroll/me/` endpoints are open to every signed-in person with pay set up, whatever their role or Position, and only ever return that person's own figures (`404`, `no_salary` when pay is not set up, as for owners). Everything else under `/payroll/` stays owner only.
 
 A balance contains `total_earned`, `total_deducted`, `total_paid`, `remaining`, `previous_remaining`, `current_remaining`, `advance`, `cycle_start`, `next_salary_date` and `last_payment_date`.
 

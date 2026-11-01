@@ -8,9 +8,11 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from apps.accounts.scope import scoped_users
+from apps.common.pagination import StandardPagination
 from apps.common.permissions import IsOwner
 
 from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile
@@ -20,6 +22,7 @@ from .serializers import (
     PayrollEntrySerializer,
     PayrollPaymentSerializer,
     SalaryProfileSerializer,
+    StatementRowSerializer,
     VoidSerializer,
     staff_name,
 )
@@ -27,6 +30,7 @@ from .services import (
     balance,
     create_payment,
     ensure_accruals,
+    statement,
     void_entry,
     void_payment,
 )
@@ -218,11 +222,84 @@ class BalanceListView(APIView):
     @property
     def paginator(self):
         if not hasattr(self, "_paginator"):
-            from apps.common.pagination import StandardPagination
-
             self._paginator = StandardPagination()
 
         return self._paginator
+
+
+def account_response(staff):
+    """One person's full account, or a 404 body when pay is not set up."""
+    today = timezone.localdate()
+    rows = load_balances(type(staff).objects.filter(pk=staff.pk), today)
+
+    if not rows:
+        return None
+
+    staff, profile, bal = rows[0]
+
+    data = summary(staff, profile, bal)
+
+    data["unsettled"] = [
+        {
+            "id": e.pk,
+            "kind": e.kind,
+            "entry_date": e.entry_date,
+            "description": e.description,
+            "amount": e.amount,
+            "paid": e.paid,
+            "remaining": e.remaining,
+            "state": e.state,
+            "carried_over": e.carried_over,
+        }
+        for e in bal["earnings"]
+        if e.remaining > 0
+    ]
+
+    data["recent_payments"] = PayrollPayment.objects.filter(
+        staff=staff, status=PayrollPayment.Status.ACTIVE
+    ).select_related("staff")[:10]
+
+    return BalanceDetailSerializer(data).data
+
+
+def no_pay_response():
+    return Response(
+        {"detail": "Pay is not set up for this person.", "code": "no_salary"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def statement_response(request, staff):
+    """
+    The statement, newest first, paginated. ``date_from`` and ``date_to``
+    limit the lines shown; the running figures always count from the start.
+    """
+    today = timezone.localdate()
+    rows = load_balances(type(staff).objects.filter(pk=staff.pk), today)
+
+    if not rows:
+        return no_pay_response()
+
+    _, _, bal = rows[0]
+
+    lines = statement(bal["entries"], bal["payments"])
+
+    query = request.query_params
+
+    if date_from := query.get("date_from"):
+        lines = [r for r in lines if r["date"].isoformat() >= date_from]
+
+    if date_to := query.get("date_to"):
+        lines = [r for r in lines if r["date"].isoformat() <= date_to]
+
+    lines.reverse()
+
+    paginator = StandardPagination()
+    page = paginator.paginate_queryset(lines, request)
+
+    return paginator.get_paginated_response(
+        StatementRowSerializer(page, many=True).data
+    )
 
 
 class BalanceDetailView(APIView):
@@ -231,43 +308,50 @@ class BalanceDetailView(APIView):
     permission_classes = [IsOwner]
 
     def get(self, request, staff_id):
-        staff_qs = scoped_users(request.active_business).filter(pk=staff_id)
-        get_object_or_404(staff_qs)
+        staff = get_object_or_404(
+            scoped_users(request.active_business), pk=staff_id
+        )
 
-        today = timezone.localdate()
-        rows = load_balances(staff_qs, today)
+        return Response(account_response(staff)) if (
+            SalaryProfile.objects.filter(user=staff).exists()
+        ) else no_pay_response()
 
-        if not rows:
-            return Response(
-                {"detail": "Pay is not set up for this person.", "code": "no_salary"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
 
-        staff, profile, bal = rows[0]
+class StatementView(APIView):
+    """
+    Every amount earned and paid for one person, with what was still owed
+    (or paid ahead as an advance) after each line.
+    """
 
-        data = summary(staff, profile, bal)
+    permission_classes = [IsOwner]
 
-        data["unsettled"] = [
-            {
-                "id": e.pk,
-                "kind": e.kind,
-                "entry_date": e.entry_date,
-                "description": e.description,
-                "amount": e.amount,
-                "paid": e.paid,
-                "remaining": e.remaining,
-                "state": e.state,
-                "carried_over": e.carried_over,
-            }
-            for e in bal["earnings"]
-            if e.remaining > 0
-        ]
+    def get(self, request, staff_id):
+        staff = get_object_or_404(
+            scoped_users(request.active_business), pk=staff_id
+        )
 
-        data["recent_payments"] = PayrollPayment.objects.filter(
-            staff=staff, status=PayrollPayment.Status.ACTIVE
-        ).select_related("staff")[:10]
+        return statement_response(request, staff)
 
-        return Response(BalanceDetailSerializer(data).data)
+
+class MyPayView(APIView):
+    """The signed-in person's own account (their salary tracker)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not SalaryProfile.objects.filter(user=request.user).exists():
+            return no_pay_response()
+
+        return Response(account_response(request.user))
+
+
+class MyStatementView(APIView):
+    """The signed-in person's own statement."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return statement_response(request, request.user)
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +445,20 @@ class PayrollPaymentViewSet(viewsets.ModelViewSet):
             notes=data.get("notes", ""),
         )
 
-        return Response(
-            self.get_serializer(payment).data, status=status.HTTP_201_CREATED
-        )
+        data = self.get_serializer(payment).data
+
+        # What is left (or paid ahead) now that this payment is recorded.
+        _, _, bal = load_balances(
+            type(payment.staff).objects.filter(pk=payment.staff_id),
+            timezone.localdate(),
+        )[0]
+
+        data["balance_after"] = {
+            "remaining": f"{bal['remaining']:.2f}",
+            "advance": f"{bal['advance']:.2f}",
+        }
+
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def void(self, request, pk=None):

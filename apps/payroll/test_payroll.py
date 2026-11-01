@@ -823,3 +823,236 @@ class PayrollModelTests(PayrollTestCase):
                 user=self.sita, pay_type="monthly", rate=None,
                 start_date=date(2026, 1, 1), accrued_through=date(2025, 12, 31),
             )
+
+
+class StatementTests(PayrollTestCase):
+
+    def statement(self, staff, **query):
+        response = self.client.get(
+            f"{BALANCES_URL}{staff.pk}/statement/", query
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        return response.json()
+
+    def test_an_advance_shows_how_much_was_paid_when_and_what_is_left(self):
+        self.monthly(day=5)
+        self.today(date(2026, 1, 2))
+
+        paid = self.pay(self.ram, "10000.00")
+
+        # The response already says where the account stands.
+        self.assertEqual(
+            paid.json()["balance_after"], {"remaining": "0.00", "advance": "10000.00"}
+        )
+
+        line = self.statement(self.ram)["results"][0]
+        self.assertEqual(line["type"], "payment")
+        self.assertEqual(line["date"], "2026-01-02")
+        self.assertEqual(line["amount"], "10000.00")
+        self.assertEqual(line["method"], "cash")
+        self.assertEqual(line["advance_part"], "10000.00")
+        self.assertEqual(line["advance_after"], "10000.00")
+        self.assertEqual(line["owed_after"], "0.00")
+
+        # On the salary day the advance is used up and the rest is owed.
+        self.today(date(2026, 1, 5))
+        lines = self.statement(self.ram)["results"]
+
+        self.assertEqual([l["type"] for l in lines], ["salary", "payment"])
+        self.assertEqual(lines[0]["amount"], "32000.00")
+        self.assertEqual(lines[0]["owed_after"], "22000.00")
+        self.assertEqual(lines[0]["advance_after"], "0.00")
+
+    def test_a_payment_after_the_salary_is_not_an_advance(self):
+        self.monthly(day=5)
+        self.today(date(2026, 1, 5))
+
+        paid = self.pay(self.ram, "12000.00")
+        line = self.statement(self.ram)["results"][0]
+
+        self.assertEqual(paid.json()["balance_after"]["remaining"], "20000.00")
+        self.assertEqual(line["advance_part"], "0.00")
+        self.assertEqual(line["owed_after"], "20000.00")
+
+    def test_paying_more_than_owed_splits_the_advance_part(self):
+        self.monthly(day=5)
+        self.today(date(2026, 1, 5))
+
+        self.pay(self.ram, "40000.00")
+        line = self.statement(self.ram)["results"][0]
+
+        self.assertEqual(line["advance_part"], "8000.00")
+        self.assertEqual(line["advance_after"], "8000.00")
+
+    def test_daily_statement_runs_day_by_day(self):
+        self.daily()
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-09", "800.00")
+        self.pay(self.sita, "500.00")
+        self.wage(self.sita, "2026-01-10", "900.00")
+
+        results = self.statement(self.sita)["results"]
+
+        # Newest first.
+        self.assertEqual(
+            [(r["date"], r["type"], r["owed_after"]) for r in results],
+            [
+                # Within a day, earnings come before payments.
+                ("2026-01-10", "payment", "1200.00"),
+                ("2026-01-10", "wage", "1700.00"),
+                ("2026-01-09", "wage", "800.00"),
+            ],
+        )
+
+    def test_deductions_and_voided_items(self):
+        self.daily()
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-10", "800.00")
+        self.entry(self.sita, "deduction", "2026-01-10", "100")
+        payment_id = self.pay(self.sita, "300.00").data["id"]
+        self.client.post(
+            f"{PAYMENTS_URL}{payment_id}/void/", {"reason": "typo"}, format="json"
+        )
+
+        results = self.statement(self.sita)["results"]
+
+        self.assertEqual([r["type"] for r in results], ["deduction", "wage"])
+        self.assertEqual(results[0]["direction"], "deducted")
+        self.assertEqual(results[0]["owed_after"], "700.00")
+
+    def test_date_filter_keeps_the_running_figures(self):
+        self.daily()
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-08", "800.00")
+        self.wage(self.sita, "2026-01-10", "900.00")
+
+        body = self.statement(self.sita, date_from="2026-01-10")
+
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["results"][0]["owed_after"], "1700.00")
+
+    def test_last_line_matches_the_balance(self):
+        self.monthly(day=5)
+        self.today(date(2026, 3, 20))
+        self.pay(self.ram, "50000.00")
+
+        newest = self.statement(self.ram)["results"][0]
+
+        self.assertEqual(
+            newest["owed_after"], self.balance(self.ram)["remaining"]
+        )
+
+    def test_statement_is_owner_only_and_scoped(self):
+        self.monthly()
+
+        self.authenticate("OTHER-HO", "owner")
+        self.assertEqual(
+            self.client.get(f"{BALANCES_URL}{self.ram.pk}/statement/").status_code, 404
+        )
+
+        self.authenticate("ACME-HO", "owner")
+        # No pay set up for sita.
+        self.assertEqual(
+            self.client.get(f"{BALANCES_URL}{self.sita.pk}/statement/").status_code, 404
+        )
+
+        self.authenticate("ACME-HO", "ram", password=self.password)
+        self.assertEqual(
+            self.client.get(f"{BALANCES_URL}{self.ram.pk}/statement/").status_code, 403
+        )
+
+
+class MySalaryTrackerTests(PayrollTestCase):
+    """Staff see their own pay, and nobody else's."""
+
+    def sign_in(self, username, code="ACME-HO"):
+        self.authenticate(code, username, password=self.password)
+
+    def test_staff_see_their_own_account(self):
+        self.monthly(day=5)
+        self.today(date(2026, 1, 2))
+        self.pay(self.ram, "10000.00")
+        self.today(date(2026, 1, 5))
+
+        self.sign_in("ram")
+        mine = self.client.get("/api/v1/payroll/me/")
+
+        self.assertEqual(mine.status_code, 200, mine.data)
+        body = mine.json()
+        self.assertEqual(body["staff"], self.ram.pk)
+        self.assertEqual(body["pay_type"], "monthly")
+        self.assertEqual(body["total_earned"], "32000.00")
+        self.assertEqual(body["total_paid"], "10000.00")
+        self.assertEqual(body["remaining"], "22000.00")
+        self.assertEqual(body["next_salary_date"], "2026-02-05")
+        self.assertEqual(body["recent_payments"][0]["amount"], "10000.00")
+        self.assertEqual(body["recent_payments"][0]["paid_on"], "2026-01-02")
+
+    def test_staff_see_their_own_statement_with_advance_and_balance(self):
+        self.monthly(day=5)
+        self.today(date(2026, 1, 2))
+        self.pay(self.ram, "10000.00")
+
+        self.sign_in("ram")
+        lines = self.client.get("/api/v1/payroll/me/statement/").json()["results"]
+
+        self.assertEqual(lines[0]["advance_part"], "10000.00")
+        self.assertEqual(lines[0]["advance_after"], "10000.00")
+
+    def test_a_daily_worker_sees_what_is_still_owed(self):
+        self.daily()
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-10", "800.00")
+        self.pay(self.sita, "500.00")
+
+        self.sign_in("sita")
+        body = self.client.get("/api/v1/payroll/me/").json()
+
+        self.assertEqual(body["remaining"], "300.00")
+        self.assertEqual(body["unsettled"][0]["state"], "partial")
+
+    def test_staff_never_see_anyone_elses_pay(self):
+        self.monthly()
+        self.daily()
+        self.pay(self.ram, "100.00")
+        self.pay(self.sita, "999.00")
+
+        self.sign_in("ram")
+
+        statement = self.client.get("/api/v1/payroll/me/statement/").json()
+        self.assertEqual({r["amount"] for r in statement["results"]}, {"100.00"})
+        for url in (BALANCES_URL, PAYMENTS_URL, ENTRIES_URL, SALARIES_URL):
+            self.assertEqual(self.client.get(url).status_code, 403)
+
+    def test_people_without_pay_set_up_get_a_clear_404(self):
+        self.sign_in("ram")
+
+        response = self.client.get("/api/v1/payroll/me/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "no_salary")
+        self.assertEqual(
+            self.client.get("/api/v1/payroll/me/statement/").status_code, 404
+        )
+
+    def test_it_requires_signing_in(self):
+        self.client.credentials()
+
+        self.assertEqual(self.client.get("/api/v1/payroll/me/").status_code, 401)
+
+    def test_a_branch_staff_member_can_see_their_pay(self):
+        self.make_user("bowner", User.Role.OWNER, business=self.branch)
+        position = self.make_position(self.branch, "Branch Sales")
+        bina = self.make_user(
+            "bina", User.Role.STAFF, business=self.branch, position=position
+        )
+        self.authenticate("ACME-BR", "bowner")
+        self.monthly(staff=bina, rate="18000.00", allowances="0.00", day=1)
+        self.today(date(2026, 1, 3))
+        self.pay(bina, "4000.00")
+
+        self.sign_in("bina", "ACME-BR")
+        body = self.client.get("/api/v1/payroll/me/").json()
+
+        self.assertEqual(body["remaining"], "14000.00")

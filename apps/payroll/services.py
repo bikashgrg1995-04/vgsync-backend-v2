@@ -227,6 +227,8 @@ def balance(profile, entries, payments, today):
 
     return {
         "earnings": earnings,
+        "entries": entries,
+        "payments": payments,
         "pay_type": profile.pay_type,
         "total_earned": totals["earned"],
         "total_deducted": totals["deducted"],
@@ -239,6 +241,68 @@ def balance(profile, entries, payments, today):
         "next_salary_date": next_salary_date(profile, today),
         "last_payment_date": last_payment,
     }
+
+
+def statement(entries, payments):
+    """
+    The account as a statement: every amount earned, deducted or paid in
+    date order, each with what was still owed (or paid ahead) right after
+    it. A payment also says how much of it was an advance, meaning paid
+    before there was anything owed.
+    """
+    items = [(e.entry_date, 0, e.id, e) for e in entries] + [
+        (p.paid_on, 1, p.id, p) for p in payments
+    ]
+    items.sort(key=lambda item: item[:3])
+
+    rows = []
+    running = ZERO
+
+    for day, _, _, item in items:
+        row = {
+            "id": item.id,
+            "date": day,
+            "amount": item.amount,
+            "description": "",
+            "method": "",
+            "reference": "",
+            "advance_part": ZERO,
+        }
+
+        if isinstance(item, PayrollPayment):
+            owed_before = max(running, ZERO)
+
+            running -= item.amount
+            row.update(
+                type="payment",
+                direction="paid",
+                description=item.notes or "Payment",
+                method=item.method,
+                reference=item.reference,
+                advance_part=max(item.amount - owed_before, ZERO),
+            )
+
+        elif item.kind == PayrollEntry.Kind.DEDUCTION:
+            running -= item.amount
+            row.update(
+                type=item.kind,
+                direction="deducted",
+                description=item.description or "Deduction",
+            )
+
+        else:
+            running += item.amount
+            row.update(
+                type=item.kind,
+                direction="earned",
+                description=item.description or item.get_kind_display(),
+            )
+
+        row["owed_after"] = max(running, ZERO)
+        row["advance_after"] = max(-running, ZERO)
+        rows.append(row)
+
+    return rows
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,9 @@ from rest_framework.routers import SimpleRouter
 from .views import (
     BalanceDetailView,
     BalanceListView,
+    MyPayView,
+    MyStatementView,
+    StatementView,
     PayrollEntryViewSet,
     PayrollPaymentViewSet,
     SalaryDetailView,
@@ -21,4 +24,11 @@ urlpatterns = [
     path("salaries/<int:staff_id>/", SalaryDetailView.as_view(), name="salary"),
     path("balances/", BalanceListView.as_view(), name="balances"),
     path("balances/<int:staff_id>/", BalanceDetailView.as_view(), name="balance"),
+    path(
+        "balances/<int:staff_id>/statement/",
+        StatementView.as_view(),
+        name="statement",
+    ),
+    path("me/", MyPayView.as_view(), name="my-pay"),
+    path("me/statement/", MyStatementView.as_view(), name="my-statement"),
 ] + router.urls
