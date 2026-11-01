@@ -8,6 +8,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
 
     path("api/v1/auth/", include("apps.accounts.urls")),
+    path("api/v1/", include("apps.accounts.manage_urls")),
+    path("api/v1/payroll/", include("apps.payroll.urls")),
 ]
 
 # Serve uploaded media files in development only.

@@ -107,3 +107,13 @@ class VGSyncUserAdmin(UserAdmin):
     )
 
     ordering = ("username",)
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+
+        # Accounts created here are handed to someone else with a password
+        # the admin chose, so by default the new user must set their own
+        # password at first login. Untick the box to opt out.
+        initial.setdefault("must_change_password", True)
+
+        return initial

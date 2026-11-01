@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "apps.companies.apps.CompaniesConfig",
     "apps.businesses.apps.BusinessesConfig",
     "apps.inventory.apps.InventoryConfig",
+    "apps.payroll.apps.PayrollConfig",
 ]
 
 MIDDLEWARE = [
@@ -164,6 +165,7 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
+    "DEFAULT_PAGINATION_CLASS": "apps.common.pagination.StandardPagination",
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 
     # Rate limits for the auth endpoints (see apps/common/throttling.py).

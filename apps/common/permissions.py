@@ -1,5 +1,5 @@
 
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from apps.accounts.models import PositionPermission, User
 
@@ -18,6 +18,33 @@ class HasActiveBusinessContext(BasePermission):
             and request.user.is_authenticated
             and getattr(request, "active_business", None) is not None
         )
+
+
+class IsOwner(BasePermission):
+    """
+    Only the owner of the active business may use the view.
+
+    A company owner has full access in the Head Office but is read-only
+    inside Branches (the same ``access_mode`` rule as everywhere else), so
+    writes are refused there.
+    """
+
+    message = "Only the owner can manage this."
+
+    def has_permission(self, request, view):
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        if user.role != User.Role.OWNER:
+            return False
+
+        if request.method in SAFE_METHODS:
+            return True
+
+        return getattr(request, "access_mode", None) == "full"
 
 
 class HasModulePermission(BasePermission):
