@@ -13,7 +13,7 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | JWT login, token refresh, current user, change password | API |
 | Owner account setup with forced password change at first login | Django Admin and API |
 | Team management: staff, roles, Positions and module permissions (owner only) | API |
-| Payroll: salaries, monthly records, mark paid, void (owner only) | API |
+| Payroll: monthly, daily and hourly pay, records, mark paid, void (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Company / business management APIs | Not yet implemented |
 | Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
@@ -291,14 +291,20 @@ Adding a person:
 Same scope rules as the team management API. Money is sent and returned as strings such as `"30000.00"`. The server calculates the net salary; any `net_salary` sent by a client is ignored.
 
 ```
+basic salary = rate                    (monthly)
+             = rate x days worked      (daily)
+             = rate x hours worked     (hourly)
+
 net salary = basic salary + allowances + bonus - deductions - advance deduction
 ```
+
+Each person has a **pay type** (`monthly`, `daily` or `hourly`) and a `rate` per month, day or hour. `allowances` is a fixed amount added to every record. `basic_salary` on a record is calculated by the server and cannot be sent.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/payroll/salaries/` | Salaries of the team |
-| `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change one person's `basic_salary` and `allowances` |
-| `GET`, `POST` | `/payroll/records/` | List records (filters: `status`, `staff`, `period_start__gte`, `paid_on__gte` and similar) or create one |
+| `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change one person's `pay_type`, `rate` and `allowances` |
+| `GET`, `POST` | `/payroll/records/` | List records (filters: `status`, `pay_type`, `staff`, `period_start__gte`, `paid_on__gte` and similar) or create one |
 | `GET`, `PATCH`, `DELETE` | `/payroll/records/{id}/` | View, edit or delete a **draft** |
 | `POST` | `/payroll/records/generate/` | Create a draft for every active person who has a salary, for a period |
 | `POST` | `/payroll/records/{id}/pay/` | Mark paid |
@@ -308,12 +314,13 @@ Typical monthly flow:
 
 1. Set each person's salary once with `PUT /payroll/salaries/{staff_id}/`.
 2. Each month call `POST /payroll/records/generate/` with `{"period_start": "2026-01-01", "period_end": "2026-01-31"}`. The response lists what was `created` and who was `skipped` (`no_salary` or `already_exists`).
-3. Adjust a draft with `PATCH` (`bonus`, `deductions`, `advance_deduction`, `notes`).
+3. Adjust a draft with `PATCH` (`bonus`, `deductions`, `advance_deduction`, `notes`). For daily and hourly staff, enter the days or hours worked in `units` (for example `22` or `160.5`); a generated draft starts with `units` at 0.
 4. Pay with `POST .../pay/` and `{"payment_method": "cash", "paid_on": "2026-01-31", "payment_reference": "..."}`. The method is `cash`, `bank` or `online`; the date defaults to today and cannot be in the future.
 
 Rules:
 
-- A record keeps its own copy of the amounts, so changing a salary later never changes past records.
+- `units` applies only to daily and hourly pay and cannot exceed the days (or 24 hours a day) in the period. A daily or hourly draft with no units cannot be paid (`409`, `units_required`).
+- A record keeps its own copy of the pay type, rate and amounts, so changing a salary later never changes past records.
 - A person cannot have two live records for overlapping periods.
 - A paid record is locked (`409`, `document_not_editable`). To correct it, void it with a reason and create a new one. Voided records stay on file with who voided them and why.
 - Deductions plus advance recovery cannot exceed the pay.

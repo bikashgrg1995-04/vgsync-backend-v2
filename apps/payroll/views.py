@@ -31,7 +31,7 @@ class SalaryListView(generics.ListAPIView):
     permission_classes = [IsOwner]
     serializer_class = SalaryProfileSerializer
     search_fields = ("user__username", "user__first_name", "user__last_name")
-    ordering_fields = ("user__username", "basic_salary", "updated_at")
+    ordering_fields = ("user__username", "rate", "updated_at")
     ordering = ("user__username",)
 
     def get_queryset(self):
@@ -87,6 +87,7 @@ class PayrollRecordViewSet(viewsets.ModelViewSet):
 
     filterset_fields = {
         "status": ["exact"],
+        "pay_type": ["exact"],
         "staff": ["exact"],
         "period_start": ["gte", "lte"],
         "period_end": ["gte", "lte"],

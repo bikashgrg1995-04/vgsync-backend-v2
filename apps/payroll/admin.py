@@ -5,7 +5,7 @@ from .models import PayrollRecord, SalaryProfile
 
 @admin.register(SalaryProfile)
 class SalaryProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "basic_salary", "allowances", "updated_at")
+    list_display = ("user", "pay_type", "rate", "allowances", "updated_at")
     search_fields = ("user__username", "user__first_name", "user__last_name")
     readonly_fields = ("created_at", "updated_at")
 

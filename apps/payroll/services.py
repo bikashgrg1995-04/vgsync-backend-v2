@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from apps.common.exceptions import Conflict
 
-from .models import PayrollRecord, SalaryProfile
+from .models import PayrollRecord, PayType, SalaryProfile
 
 
 def overlapping_records(staff, period_start, period_end, exclude=None):
@@ -58,7 +58,10 @@ def generate_drafts(*, business, staff_queryset, period_start, period_end, actor
                 staff=staff,
                 period_start=period_start,
                 period_end=period_end,
-                basic_salary=profile.basic_salary,
+                pay_type=profile.pay_type,
+                rate=profile.rate,
+                # Days or hours are entered after the period, before paying.
+                units=None if profile.pay_type == PayType.MONTHLY else 0,
                 allowances=profile.allowances,
                 created_by=actor,
             )
@@ -75,6 +78,15 @@ def mark_paid(*, record, actor, paid_on, payment_method, payment_reference=""):
         raise Conflict(
             f"Only a draft can be paid; this record is {record.status}.",
             code="invalid_status",
+        )
+
+    if record.pay_type != PayType.MONTHLY and not record.units:
+        unit = "days" if record.pay_type == PayType.DAILY else "hours"
+
+        raise Conflict(
+            f"Enter the {unit} worked before paying. Delete the draft if "
+            "there is nothing to pay.",
+            code="units_required",
         )
 
     record.status = PayrollRecord.Status.PAID

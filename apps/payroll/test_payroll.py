@@ -38,7 +38,7 @@ class PayrollTestCase(TenantTestMixin, APITestCase):
     def set_salary(self, staff, basic="30000.00", allowances="2000.00"):
         return self.client.put(
             f"{SALARIES_URL}{staff.pk}/",
-            {"basic_salary": basic, "allowances": allowances},
+            {"rate": basic, "allowances": allowances},
             format="json",
         )
 
@@ -60,7 +60,7 @@ class SalaryTests(PayrollTestCase):
 
         self.assertEqual(created.status_code, 201, created.data)
         self.assertEqual(created.data["staff"], self.ram.pk)
-        self.assertEqual(money(created.data["basic_salary"]), money("30000.00"))
+        self.assertEqual(money(created.data["rate"]), money("30000.00"))
         self.assertEqual(created.data["staff_name"], "Ram Thapa")
 
         updated = self.set_salary(self.ram, basic="35000.00")
@@ -72,7 +72,7 @@ class SalaryTests(PayrollTestCase):
         )
 
         fetched = self.client.get(f"{SALARIES_URL}{self.ram.pk}/")
-        self.assertEqual(money(fetched.data["basic_salary"]), money("35000.00"))
+        self.assertEqual(money(fetched.data["rate"]), money("35000.00"))
 
     def test_negative_or_missing_salary_is_rejected(self):
         negative = self.set_salary(self.ram, basic="-1")
@@ -102,7 +102,7 @@ class SalaryTests(PayrollTestCase):
         self.assertEqual(self.client.get(f"{SALARIES_URL}{self.ram.pk}/").status_code, 404)
         self.assertEqual(self.set_salary(self.ram, basic="1.00").status_code, 404)
         self.assertEqual(
-            money(SalaryProfile.objects.get(user=self.ram).basic_salary),
+            money(SalaryProfile.objects.get(user=self.ram).rate),
             money("30000.00"),
         )
 
@@ -145,25 +145,25 @@ class PayrollRecordTests(PayrollTestCase):
             money("30000.00"),
         )
 
-    def test_without_a_salary_the_basic_salary_must_be_given(self):
+    def test_without_a_salary_the_rate_must_be_given(self):
         missing = self.create_record()
-        explicit = self.create_record(basic_salary="20000.00")
+        explicit = self.create_record(rate="20000.00")
 
         self.assertEqual(missing.status_code, 400)
-        self.assertIn("basic_salary", missing.data)
+        self.assertIn("rate", missing.data)
         self.assertEqual(explicit.status_code, 201, explicit.data)
         self.assertEqual(money(explicit.data["net_salary"]), money("20000.00"))
 
     def test_deductions_cannot_exceed_the_pay(self):
         response = self.create_record(
-            basic_salary="1000.00", deductions="900.00", advance_deduction="200.00"
+            rate="1000.00", deductions="900.00", advance_deduction="200.00"
         )
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(PayrollRecord.objects.exists())
 
     def test_negative_amounts_are_rejected(self):
-        response = self.create_record(basic_salary="1000.00", bonus="-5")
+        response = self.create_record(rate="1000.00", bonus="-5")
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("bonus", response.data)
@@ -171,21 +171,21 @@ class PayrollRecordTests(PayrollTestCase):
     def test_period_end_cannot_precede_start(self):
         response = self.create_record(
             period={"period_start": "2026-02-10", "period_end": "2026-02-01"},
-            basic_salary="1000.00",
+            rate="1000.00",
         )
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("period_end", response.data)
 
     def test_overlapping_periods_are_rejected(self):
-        self.assertEqual(self.create_record(basic_salary="1000").status_code, 201)
+        self.assertEqual(self.create_record(rate="1000").status_code, 201)
 
-        same = self.create_record(basic_salary="1000")
+        same = self.create_record(rate="1000")
         partial = self.create_record(
             period={"period_start": "2026-01-15", "period_end": "2026-02-14"},
-            basic_salary="1000",
+            rate="1000",
         )
-        next_month = self.create_record(period=FEB, basic_salary="1000")
+        next_month = self.create_record(period=FEB, rate="1000")
 
         self.assertEqual(same.status_code, 400)
         self.assertEqual(partial.status_code, 400)
@@ -194,13 +194,13 @@ class PayrollRecordTests(PayrollTestCase):
     def test_inactive_staff_cannot_be_paid(self):
         User.objects.filter(pk=self.ram.pk).update(is_active=False)
 
-        response = self.create_record(basic_salary="1000")
+        response = self.create_record(rate="1000")
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("staff", response.data)
 
     def test_edit_a_draft_recalculates_net(self):
-        record_id = self.create_record(basic_salary="1000.00").data["id"]
+        record_id = self.create_record(rate="1000.00").data["id"]
 
         response = self.client.patch(
             f"{RECORDS_URL}{record_id}/", {"bonus": "250.00"}, format="json"
@@ -210,7 +210,7 @@ class PayrollRecordTests(PayrollTestCase):
         self.assertEqual(money(response.data["net_salary"]), money("1250.00"))
 
     def test_person_and_period_of_a_draft_are_fixed(self):
-        record_id = self.create_record(basic_salary="1000.00").data["id"]
+        record_id = self.create_record(rate="1000.00").data["id"]
 
         for change in ({"staff": self.sita.pk}, {"period_end": "2026-03-31"}):
             response = self.client.patch(
@@ -220,7 +220,7 @@ class PayrollRecordTests(PayrollTestCase):
             self.assertEqual(response.status_code, 400, change)
 
     def test_client_cannot_set_status_or_payment_fields(self):
-        record_id = self.create_record(basic_salary="1000.00").data["id"]
+        record_id = self.create_record(rate="1000.00").data["id"]
 
         self.client.patch(
             f"{RECORDS_URL}{record_id}/",
@@ -234,14 +234,14 @@ class PayrollRecordTests(PayrollTestCase):
         self.assertIsNone(record.paid_by)
 
     def test_delete_removes_a_draft(self):
-        record_id = self.create_record(basic_salary="1000.00").data["id"]
+        record_id = self.create_record(rate="1000.00").data["id"]
 
         self.assertEqual(self.client.delete(f"{RECORDS_URL}{record_id}/").status_code, 204)
         self.assertFalse(PayrollRecord.objects.exists())
 
     def test_list_filters_search_and_pagination(self):
-        first = self.create_record(basic_salary="1000.00").data["id"]
-        self.create_record(staff=self.sita, period=FEB, basic_salary="2000.00")
+        first = self.create_record(rate="1000.00").data["id"]
+        self.create_record(staff=self.sita, period=FEB, rate="2000.00")
         self.pay(first)
 
         everything = self.client.get(RECORDS_URL)
@@ -268,7 +268,7 @@ class PayAndVoidTests(PayrollTestCase):
     def setUp(self):
         super().setUp()
 
-        self.record_id = self.create_record(basic_salary="10000.00").data["id"]
+        self.record_id = self.create_record(rate="10000.00").data["id"]
 
     def test_pay_locks_the_record_and_records_who_and_how(self):
         response = self.pay(self.record_id, payment_reference="TXN-1")
@@ -367,7 +367,7 @@ class PayAndVoidTests(PayrollTestCase):
             f"{RECORDS_URL}{self.record_id}/void/", {"reason": "Wrong"}, format="json"
         )
 
-        replacement = self.create_record(basic_salary="10500.00")
+        replacement = self.create_record(rate="10500.00")
 
         self.assertEqual(replacement.status_code, 201, replacement.data)
         self.assertEqual(PayrollRecord.objects.filter(staff=self.ram).count(), 2)
@@ -507,7 +507,7 @@ class PayrollModelTests(PayrollTestCase):
             staff=self.ram,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 1, 31),
-            basic_salary=Decimal("1000.00"),
+            rate=Decimal("1000.00"),
             bonus=Decimal("100.00"),
             net_salary=Decimal("999999.00"),
         )
@@ -526,7 +526,7 @@ class PayrollModelTests(PayrollTestCase):
             staff=self.ram,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 1, 31),
-            basic_salary=Decimal("1000.00"),
+            rate=Decimal("1000.00"),
         )
         PayrollRecord.objects.create(**fields)
 
@@ -543,6 +543,183 @@ class PayrollModelTests(PayrollTestCase):
                 staff=self.ram,
                 period_start=date(2026, 1, 1),
                 period_end=date(2026, 1, 31),
-                basic_salary=Decimal("100.00"),
+                rate=Decimal("100.00"),
                 deductions=Decimal("500.00"),
+            )
+
+
+class PayTypeTests(PayrollTestCase):
+    """Monthly, daily and hourly pay."""
+
+    def set_pay(self, staff, pay_type, rate, allowances="0.00"):
+        return self.client.put(
+            f"{SALARIES_URL}{staff.pk}/",
+            {"pay_type": pay_type, "rate": rate, "allowances": allowances},
+            format="json",
+        )
+
+    def test_pay_type_defaults_to_monthly(self):
+        response = self.set_salary(self.ram)
+
+        self.assertEqual(response.data["pay_type"], "monthly")
+
+    def test_a_pay_type_must_be_a_known_one(self):
+        self.assertEqual(self.set_pay(self.ram, "weekly", "100").status_code, 400)
+
+    def test_daily_pay_is_rate_times_days_worked(self):
+        self.set_pay(self.ram, "daily", "800.00", allowances="500.00")
+
+        response = self.create_record(units="22", bonus="100.00")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["pay_type"], "daily")
+        self.assertEqual(money(response.data["rate"]), money("800.00"))
+        self.assertEqual(money(response.data["units"]), money("22.00"))
+        self.assertEqual(money(response.data["basic_salary"]), money("17600.00"))
+        # 17600 + 500 + 100
+        self.assertEqual(money(response.data["net_salary"]), money("18200.00"))
+
+    def test_hourly_pay_allows_part_hours(self):
+        self.set_pay(self.ram, "hourly", "150.00")
+
+        response = self.create_record(units="160.50")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(money(response.data["net_salary"]), money("24075.00"))
+
+    def test_units_can_be_filled_in_later_on_the_draft(self):
+        self.set_pay(self.ram, "hourly", "100.00")
+        record_id = self.create_record().data["id"]
+
+        self.assertEqual(
+            money(self.client.get(f"{RECORDS_URL}{record_id}/").data["net_salary"]),
+            money("0.00"),
+        )
+
+        edited = self.client.patch(
+            f"{RECORDS_URL}{record_id}/", {"units": "40"}, format="json"
+        )
+
+        self.assertEqual(edited.status_code, 200, edited.data)
+        self.assertEqual(money(edited.data["net_salary"]), money("4000.00"))
+
+    def test_monthly_pay_rejects_units(self):
+        self.set_salary(self.ram)
+
+        response = self.create_record(units="10")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("units", response.data)
+
+    def test_units_cannot_exceed_the_period(self):
+        self.set_pay(self.ram, "daily", "800.00")
+        self.set_pay(self.sita, "hourly", "100.00")
+
+        self.assertEqual(self.create_record(units="32").status_code, 400)
+        self.assertEqual(self.create_record(units="31").status_code, 201)
+        self.assertEqual(
+            self.create_record(staff=self.sita, units="745").status_code, 400
+        )
+        self.assertEqual(
+            self.create_record(staff=self.sita, units="744").status_code, 201
+        )
+
+    def test_negative_units_are_rejected(self):
+        self.set_pay(self.ram, "daily", "800.00")
+
+        self.assertEqual(self.create_record(units="-1").status_code, 400)
+
+    def test_a_different_pay_type_needs_its_own_rate(self):
+        self.set_pay(self.ram, "monthly", "30000.00")
+
+        reused = self.create_record(pay_type="hourly", units="10")
+        explicit = self.create_record(pay_type="hourly", rate="200", units="10")
+
+        self.assertEqual(reused.status_code, 400)
+        self.assertEqual(explicit.status_code, 201, explicit.data)
+        self.assertEqual(money(explicit.data["basic_salary"]), money("2000.00"))
+
+    def test_basic_salary_sent_by_the_client_is_ignored(self):
+        self.set_pay(self.ram, "daily", "800.00")
+
+        response = self.create_record(units="10", basic_salary="999999.00")
+
+        self.assertEqual(money(response.data["basic_salary"]), money("8000.00"))
+
+    def test_a_later_rate_change_does_not_alter_existing_records(self):
+        self.set_pay(self.ram, "daily", "800.00")
+        record_id = self.create_record(units="10").data["id"]
+
+        self.set_pay(self.ram, "hourly", "1.00")
+
+        record = self.client.get(f"{RECORDS_URL}{record_id}/").data
+        self.assertEqual(record["pay_type"], "daily")
+        self.assertEqual(money(record["basic_salary"]), money("8000.00"))
+
+    def test_generate_makes_each_person_a_draft_of_their_own_pay_type(self):
+        self.set_salary(self.ram)
+        self.set_pay(self.sita, "daily", "800.00", allowances="300.00")
+
+        response = self.client.post(
+            f"{RECORDS_URL}generate/", JAN, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+
+        by_staff = {r["staff"]: r for r in response.data["created"]}
+        self.assertEqual(by_staff[self.ram.pk]["pay_type"], "monthly")
+        self.assertIsNone(by_staff[self.ram.pk]["units"])
+        self.assertEqual(by_staff[self.sita.pk]["pay_type"], "daily")
+        self.assertEqual(money(by_staff[self.sita.pk]["units"]), money("0"))
+        # Waiting for the days worked: only the allowance so far.
+        self.assertEqual(money(by_staff[self.sita.pk]["net_salary"]), money("300.00"))
+
+    def test_a_daily_or_hourly_draft_cannot_be_paid_without_units(self):
+        self.set_pay(self.ram, "daily", "800.00", allowances="300.00")
+        record_id = self.create_record().data["id"]
+
+        blocked = self.pay(record_id)
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.data["code"], "units_required")
+
+        self.client.patch(f"{RECORDS_URL}{record_id}/", {"units": "5"}, format="json")
+
+        self.assertEqual(self.pay(record_id).status_code, 200)
+
+    def test_switching_a_draft_to_monthly_drops_the_units(self):
+        self.set_pay(self.ram, "daily", "800.00")
+        record_id = self.create_record(units="5").data["id"]
+
+        edited = self.client.patch(
+            f"{RECORDS_URL}{record_id}/",
+            {"pay_type": "monthly", "rate": "20000.00"},
+            format="json",
+        )
+
+        self.assertEqual(edited.status_code, 200, edited.data)
+        self.assertIsNone(edited.data["units"])
+        self.assertEqual(money(edited.data["net_salary"]), money("20000.00"))
+
+    def test_records_can_be_filtered_by_pay_type(self):
+        self.set_salary(self.ram)
+        self.set_pay(self.sita, "hourly", "100.00")
+        self.create_record()
+        self.create_record(staff=self.sita, units="10")
+
+        response = self.client.get(RECORDS_URL, {"pay_type": "hourly"})
+
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["staff"], self.sita.pk)
+
+    def test_database_refuses_units_on_monthly_pay(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            PayrollRecord.objects.create(
+                business=self.ho,
+                staff=self.ram,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 1, 31),
+                pay_type="monthly",
+                rate=Decimal("1000.00"),
+                units=Decimal("5"),
             )

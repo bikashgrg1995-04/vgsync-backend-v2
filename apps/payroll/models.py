@@ -5,14 +5,26 @@ from django.db import models
 from django.db.models import F, Q
 
 MONEY = {"max_digits": 12, "decimal_places": 2}
+UNITS = {"max_digits": 7, "decimal_places": 2}
 ZERO = Decimal("0.00")
+CENT = Decimal("0.01")
+
+
+class PayType(models.TextChoices):
+    """How a person is paid; ``rate`` is per month, per day or per hour."""
+
+    MONTHLY = "monthly", "Monthly"
+    DAILY = "daily", "Daily"
+    HOURLY = "hourly", "Hourly"
 
 
 class SalaryProfile(models.Model):
     """
-    The agreed monthly pay of one team member. It is the default used when
-    payroll records are generated; changing it never alters past records,
-    because each record keeps its own copy of the amounts.
+    The agreed pay of one team member: a pay type and a rate (per month,
+    per day or per hour). It is the default used when payroll records are
+    created; changing it never alters past records, because each record
+    keeps its own copy of the amounts. ``allowances`` is a fixed amount
+    added to every record whatever the pay type.
     """
 
     user = models.OneToOneField(
@@ -20,7 +32,12 @@ class SalaryProfile(models.Model):
         on_delete=models.PROTECT,
         related_name="salary_profile",
     )
-    basic_salary = models.DecimalField(**MONEY)
+    pay_type = models.CharField(
+        max_length=10,
+        choices=PayType.choices,
+        default=PayType.MONTHLY,
+    )
+    rate = models.DecimalField(**MONEY)
     allowances = models.DecimalField(**MONEY, default=ZERO)
 
     updated_by = models.ForeignKey(
@@ -36,13 +53,13 @@ class SalaryProfile(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=Q(basic_salary__gte=0) & Q(allowances__gte=0),
+                condition=Q(rate__gte=0) & Q(allowances__gte=0),
                 name="salary_profile_amounts_not_negative",
             ),
         ]
 
     def __str__(self):
-        return f"{self.user} - {self.basic_salary}"
+        return f"{self.user} - {self.rate} ({self.pay_type})"
 
 
 class PayrollRecord(models.Model):
@@ -79,7 +96,16 @@ class PayrollRecord(models.Model):
     period_start = models.DateField()
     period_end = models.DateField()
 
-    basic_salary = models.DecimalField(**MONEY)
+    pay_type = models.CharField(
+        max_length=10,
+        choices=PayType.choices,
+        default=PayType.MONTHLY,
+    )
+    rate = models.DecimalField(**MONEY, default=ZERO)
+    # Days or hours worked in the period. Empty for monthly pay.
+    units = models.DecimalField(**UNITS, null=True, blank=True)
+    # Calculated: the rate for monthly pay, otherwise rate x units.
+    basic_salary = models.DecimalField(**MONEY, editable=False, default=ZERO)
     allowances = models.DecimalField(**MONEY, default=ZERO)
     bonus = models.DecimalField(**MONEY, default=ZERO)
     deductions = models.DecimalField(**MONEY, default=ZERO)
@@ -140,7 +166,8 @@ class PayrollRecord(models.Model):
             ),
             models.CheckConstraint(
                 condition=(
-                    Q(basic_salary__gte=0)
+                    Q(rate__gte=0)
+                    & Q(basic_salary__gte=0)
                     & Q(allowances__gte=0)
                     & Q(bonus__gte=0)
                     & Q(deductions__gte=0)
@@ -148,6 +175,14 @@ class PayrollRecord(models.Model):
                     & Q(net_salary__gte=0)
                 ),
                 name="payroll_amounts_not_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(units__isnull=True) | Q(units__gte=0),
+                name="payroll_units_not_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(units__isnull=True) | ~Q(pay_type="monthly"),
+                name="payroll_monthly_has_no_units",
             ),
             # One live record per person per exact period. Overlaps are
             # rejected by the serializer; this is the database backstop.
@@ -158,9 +193,15 @@ class PayrollRecord(models.Model):
             ),
         ]
 
+    def calculate_basic(self):
+        if self.pay_type == PayType.MONTHLY:
+            return self.rate
+
+        return (self.rate * (self.units or ZERO)).quantize(CENT)
+
     def calculate_net(self):
         return (
-            self.basic_salary
+            self.calculate_basic()
             + self.allowances
             + self.bonus
             - self.deductions
@@ -168,12 +209,16 @@ class PayrollRecord(models.Model):
         )
 
     def save(self, *args, **kwargs):
+        self.basic_salary = self.calculate_basic()
         self.net_salary = self.calculate_net()
 
         update_fields = kwargs.get("update_fields")
 
         if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {"net_salary"}
+            kwargs["update_fields"] = set(update_fields) | {
+                "basic_salary",
+                "net_salary",
+            }
 
         super().save(*args, **kwargs)
 

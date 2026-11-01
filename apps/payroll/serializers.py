@@ -4,10 +4,11 @@ from rest_framework import serializers
 from apps.accounts.scope import scoped_users
 from apps.common.exceptions import Conflict
 
-from .models import PayrollRecord, SalaryProfile
+from .models import PayrollRecord, PayType, SalaryProfile
 from .services import overlapping_records
 
 AMOUNT = {"max_digits": 12, "decimal_places": 2, "min_value": 0}
+UNITS = {"max_digits": 7, "decimal_places": 2, "min_value": 0}
 
 
 def staff_name(user):
@@ -25,7 +26,15 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
     staff = serializers.IntegerField(source="user_id", read_only=True)
     staff_name = serializers.SerializerMethodField()
 
-    basic_salary = serializers.DecimalField(**AMOUNT)
+    pay_type = serializers.ChoiceField(
+        choices=PayType.choices,
+        required=False,
+        default=PayType.MONTHLY,
+    )
+    rate = serializers.DecimalField(
+        **AMOUNT,
+        help_text="Amount per month, per day or per hour, by pay type.",
+    )
     allowances = serializers.DecimalField(**AMOUNT, required=False)
 
     class Meta:
@@ -33,7 +42,8 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
         fields = (
             "staff",
             "staff_name",
-            "basic_salary",
+            "pay_type",
+            "rate",
             "allowances",
             "updated_at",
         )
@@ -53,8 +63,16 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
     staff = ScopedStaffField(required=True)
     staff_name = serializers.SerializerMethodField()
 
-    # Optional on create: they default to the staff member's salary.
-    basic_salary = serializers.DecimalField(**AMOUNT, required=False)
+    # Optional on create: pay type, rate and allowances default to the
+    # staff member's salary. ``basic_salary`` is calculated, never sent.
+    pay_type = serializers.ChoiceField(choices=PayType.choices, required=False)
+    rate = serializers.DecimalField(**AMOUNT, required=False)
+    units = serializers.DecimalField(
+        **UNITS,
+        required=False,
+        allow_null=True,
+        help_text="Days or hours worked. Only for daily or hourly pay.",
+    )
     allowances = serializers.DecimalField(**AMOUNT, required=False)
     bonus = serializers.DecimalField(**AMOUNT, required=False)
     deductions = serializers.DecimalField(**AMOUNT, required=False)
@@ -68,6 +86,9 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
             "staff_name",
             "period_start",
             "period_end",
+            "pay_type",
+            "rate",
+            "units",
             "basic_salary",
             "allowances",
             "bonus",
@@ -89,6 +110,7 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "id",
+            "basic_salary",
             "net_salary",
             "status",
             "paid_on",
@@ -159,29 +181,69 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
             # Pay defaults to the agreed salary.
             profile = getattr(staff, "salary_profile", None)
 
-            if "basic_salary" not in attrs:
+            if "rate" not in attrs:
                 if profile is None:
                     raise serializers.ValidationError({
-                        "basic_salary": (
+                        "rate": (
                             "Set a salary for this person first, or enter "
-                            "the basic salary."
+                            "the pay type and rate."
                         )
                     })
 
-                attrs["basic_salary"] = profile.basic_salary
+                attrs["rate"] = profile.rate
+
+                # The profile's pay type goes with its rate; a different
+                # type cannot reuse a rate meant for another unit.
+                if attrs.get("pay_type", profile.pay_type) != profile.pay_type:
+                    raise serializers.ValidationError(
+                        {"rate": "Enter the rate for this pay type."}
+                    )
+
+                attrs["pay_type"] = profile.pay_type
 
             if "allowances" not in attrs and profile is not None:
                 attrs["allowances"] = profile.allowances
 
+        def current(name, default):
+            if name in attrs:
+                return attrs[name]
+
+            return getattr(instance, name) if instance else default
+
+        pay_type = current("pay_type", PayType.MONTHLY)
+        units = current("units", None)
+
+        if pay_type == PayType.MONTHLY:
+            if "units" not in attrs:
+                # Switching a draft to monthly drops the days or hours.
+                attrs["units"] = units = None
+
+            if units is not None:
+                raise serializers.ValidationError(
+                    {"units": "Units apply only to daily or hourly pay."}
+                )
+        else:
+            units = units or 0
+            attrs["units"] = units
+
+            days = (period_end - period_start).days + 1
+            limit = days if pay_type == PayType.DAILY else days * 24
+            noun = "days" if pay_type == PayType.DAILY else "hours"
+
+            if units > limit:
+                raise serializers.ValidationError({
+                    "units": f"More {noun} than the period has ({limit})."
+                })
+
         # Check the result on the same figures the model will save.
         probe = PayrollRecord(
-            basic_salary=attrs.get("basic_salary", instance.basic_salary if instance else 0),
-            allowances=attrs.get("allowances", instance.allowances if instance else 0),
-            bonus=attrs.get("bonus", instance.bonus if instance else 0),
-            deductions=attrs.get("deductions", instance.deductions if instance else 0),
-            advance_deduction=attrs.get(
-                "advance_deduction", instance.advance_deduction if instance else 0
-            ),
+            pay_type=pay_type,
+            rate=current("rate", 0),
+            units=units,
+            allowances=current("allowances", 0),
+            bonus=current("bonus", 0),
+            deductions=current("deductions", 0),
+            advance_deduction=current("advance_deduction", 0),
         )
 
         if probe.calculate_net() < 0:
