@@ -70,6 +70,7 @@ Read from `.env` in the project root.
 | `DB_HOST` | No | `localhost` | PostgreSQL host |
 | `DB_PORT` | No | `5432` | PostgreSQL port |
 | `CORS_ALLOWED_ORIGINS` | No | empty | Comma-separated frontend origins allowed to call the API from a browser |
+| `REDIS_URL` | Production | empty | Redis URL for the shared cache, for example `redis://localhost:6379/1` (`rediss://` for TLS). Empty uses a per-process in-memory cache |
 | `NUM_PROXIES` | No | `0` | Number of reverse proxies in front of the app (see [Rate limiting](#rate-limiting)) |
 
 Example:
@@ -206,7 +207,7 @@ Rates are set in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in `config/settings.
 
 Two things to configure for production:
 
-- **Shared cache.** Counters are stored in Django's cache, which is per-process by default, so each worker would count separately. Configure a shared cache such as Redis in `CACHES`.
+- **Shared cache.** Counters are stored in Django's cache, which is per-process by default, so each worker would count separately. Set `REDIS_URL` so every worker shares one counter. Without it the app falls back to the in-memory cache, which is fine for development and tests.
 - **`NUM_PROXIES`.** With the default `0`, the client IP is the socket address and `X-Forwarded-For` is ignored, because clients can spoof it to dodge the limit. Behind one reverse proxy such as nginx, set `NUM_PROXIES=1`, otherwise every request appears to come from the proxy's IP and clients share one limit.
 
 ## Tests

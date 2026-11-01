@@ -197,6 +197,32 @@ SIMPLE_JWT = {
 }
 
 
+# Cache
+# The auth rate limits (see apps/common/throttling.py) count requests in the
+# cache. The default in-memory cache is per-process, so with several worker
+# processes each one counts separately and the limits are not enforced as
+# configured. Set REDIS_URL in production so all workers share one counter:
+#   REDIS_URL=redis://localhost:6379/1
+#   REDIS_URL=rediss://:password@host:6380/1   (TLS and password)
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+            "KEY_PREFIX": "vgsync",
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "vgsync-default",
+        }
+    }
+
+
 # CORS
 # Comma-separated list of allowed frontend origins, for example:
 # CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.example.com
