@@ -69,6 +69,8 @@ Read from `.env` in the project root.
 | `DB_PASSWORD` | Yes | none | PostgreSQL password |
 | `DB_HOST` | No | `localhost` | PostgreSQL host |
 | `DB_PORT` | No | `5432` | PostgreSQL port |
+| `CORS_ALLOWED_ORIGINS` | No | empty | Comma-separated frontend origins allowed to call the API from a browser |
+| `NUM_PROXIES` | No | `0` | Number of reverse proxies in front of the app (see [Rate limiting](#rate-limiting)) |
 
 Example:
 
@@ -131,9 +133,10 @@ Base path: `/api/v1/auth/`
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `POST` | `/login/` | None | Log in with business code, username, and password |
-| `POST` | `/token/refresh/` | None | Get a new access token from a refresh token |
+| `POST` | `/token/refresh/` | None | Exchange a refresh token for a new access token and a new refresh token |
+| `POST` | `/logout/` | None | Revoke a refresh token |
 | `GET` | `/me/` | Bearer | Current user and active business |
-| `POST` | `/change-password/` | Bearer | Change password |
+| `POST` | `/change-password/` | Bearer | Change password and sign out everywhere |
 
 ### Login
 
@@ -161,10 +164,50 @@ Authorization: Bearer <access>
 - On every request the active business, its company, the user's assignment, and (for staff) the Position are re-validated against the database.
 - Refreshing a token re-runs the same checks, so deactivated users, businesses, companies, or Positions can no longer refresh.
 - Login failures for an unknown business code, unknown user, or wrong password return the same generic message.
+- All of these checks (tenant, role, active business, Position) live in one function, `validate_user_access` in `apps/accounts/access.py`, which login, refresh, `/me/`, and the authentication class all use. Change access rules there.
+
+### Refresh token rotation and logout
+
+- Every call to `/token/refresh/` returns a **new** `refresh` token along with the new `access` token, and the old refresh token is blacklisted. Clients must store the new `refresh` from each response. Reusing an old one returns `401`.
+- `POST /logout/` with `{"refresh": "<token>"}` revokes that refresh token. It needs no access token, so a user with an expired access token can still sign out. Logging out twice is not an error.
+- Access tokens already issued stay valid until they expire (15 minutes).
 
 ### Change password
 
 Request body: `current_password`, `new_password`, `confirm_password`. The new password is checked against Django's password validators.
+
+Changing the password revokes every refresh token the user has, so all their sessions must log in again.
+
+### Forced password change
+
+When a user's `must_change_password` flag is set (an admin can set it on a user in Django Admin, for example after resetting their password), they can still log in, but every API call except `GET /me/` and `POST /change-password/` returns `403` with:
+
+```json
+{
+  "detail": "You must change your password before continuing.",
+  "code": "password_change_required"
+}
+```
+
+Clients should use the `code` to send the user to a change-password screen. The flag is cleared when the password is changed. The block is applied in the authentication class, so new endpoints are protected by default.
+
+### Rate limiting
+
+Auth endpoints are rate limited. Exceeding a limit returns `429` with a `Retry-After` header.
+
+| Endpoint | Limit | Counted per |
+| --- | --- | --- |
+| `/login/` | 30 per minute | IP address |
+| `/login/` | 5 per minute | business code + username (any IP) |
+| `/token/refresh/`, `/logout/` | 60 per minute | IP address |
+| `/change-password/` | 10 per hour | user |
+
+Rates are set in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in `config/settings.py`. Successful logins count toward the limits too.
+
+Two things to configure for production:
+
+- **Shared cache.** Counters are stored in Django's cache, which is per-process by default, so each worker would count separately. Configure a shared cache such as Redis in `CACHES`.
+- **`NUM_PROXIES`.** With the default `0`, the client IP is the socket address and `X-Forwarded-For` is ignored, because clients can spoof it to dodge the limit. Behind one reverse proxy such as nginx, set `NUM_PROXIES=1`, otherwise every request appears to come from the proxy's IP and clients share one limit.
 
 ## Tests
 
