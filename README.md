@@ -16,7 +16,7 @@ This repository currently contains the **foundation layer**: tenancy, authentica
 
 ## Tech stack
 
-- Python, Django 5.2
+- Python 3.12+, Django 6.1
 - Django REST Framework
 - PostgreSQL (via `psycopg` 3)
 - Simple JWT (`djangorestframework-simplejwt`)
