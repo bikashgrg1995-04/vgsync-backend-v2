@@ -9,6 +9,13 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
+from apps.common.throttling import (
+    ChangePasswordRateThrottle,
+    LoginAccountRateThrottle,
+    LoginIPRateThrottle,
+    TokenIPRateThrottle,
+)
+
 from .access import serialize_active_business
 from .serializers import (
     ChangePasswordSerializer,
@@ -21,11 +28,13 @@ from .serializers import (
 
 class LoginView(TokenObtainPairView):
     permission_classes = [AllowAny]
+    throttle_classes = [LoginIPRateThrottle, LoginAccountRateThrottle]
     serializer_class = VGSyncTokenObtainPairSerializer
 
 
 class RefreshTokenView(TokenRefreshView):
     permission_classes = [AllowAny]
+    throttle_classes = [TokenIPRateThrottle]
     serializer_class = VGSyncTokenRefreshSerializer
 
 
@@ -38,6 +47,7 @@ class LogoutView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [TokenIPRateThrottle]
 
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
@@ -84,6 +94,7 @@ class CurrentUserView(generics.RetrieveAPIView):
 
 class ChangePasswordView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ChangePasswordRateThrottle]
 
     def post(self, request):
         serializer = ChangePasswordSerializer(

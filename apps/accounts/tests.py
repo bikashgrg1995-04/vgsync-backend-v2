@@ -1,4 +1,5 @@
 
+from django.core.cache import cache
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import Position, User
@@ -9,6 +10,9 @@ from apps.companies.models import Company
 class TenantLoginTests(APITestCase):
 
     def setUp(self):
+        # Throttle counters live in the cache; start each test clean.
+        cache.clear()
+
         self.company = Company.objects.create(
             name="Test Company",
             code="TEST-COMPANY",

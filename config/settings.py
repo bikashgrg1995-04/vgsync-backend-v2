@@ -164,6 +164,21 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+
+    # Rate limits for the auth endpoints (see apps/common/throttling.py).
+    # Counters live in Django's cache; use a shared cache such as Redis in
+    # production so limits apply across worker processes.
+    "DEFAULT_THROTTLE_RATES": {
+        "login_ip": "30/minute",
+        "login_account": "5/minute",
+        "token_ip": "60/minute",
+        "change_password": "10/hour",
+    },
+
+    # How many reverse proxies sit in front of the app. With 0 the client IP
+    # is the socket address and X-Forwarded-For is ignored (it can be spoofed
+    # to dodge throttling). Set to 1 behind a single proxy such as nginx.
+    "NUM_PROXIES": int(os.getenv("NUM_PROXIES", "0")),
 }
 
 
