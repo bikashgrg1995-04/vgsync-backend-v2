@@ -4,15 +4,19 @@ Backend API for VGSync, a multi-tenant business management platform built with D
 
 ## Project status
 
-This repository currently contains the **foundation layer**: tenancy, authentication, and permissions. Business modules are not implemented yet.
+This repository contains the **foundation layer** (tenancy, authentication, permissions), the **owner's team and payroll tools**, and the start of the inventory module. The remaining business modules are not implemented yet.
 
 | Area | Status |
 | --- | --- |
 | Companies, Head Office / Branch / Independent businesses | Models and admin |
 | Users, roles, Positions, module permissions | Models, admin, and enforcement |
 | JWT login, token refresh, current user, change password | API |
+| Owner account setup with forced password change at first login | Django Admin and API |
+| Team management: staff, roles, Positions and module permissions (owner only) | API |
+| Payroll: salaries, monthly records, mark paid, void (owner only) | API |
+| Inventory | Foundation in progress (`apps/inventory`) |
 | Company / business management APIs | Not yet implemented |
-| Inventory, purchases, sales, bike sales, orders, staff and payroll, finance, dashboard, reminders | Not yet implemented (the permission system already defines these modules) |
+| Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
 ## Tech stack
 
@@ -28,10 +32,12 @@ This repository currently contains the **foundation layer**: tenancy, authentica
 ```
 config/              Django project settings, URLs, WSGI/ASGI
 apps/
-  accounts/          User, Position, PositionPermission, JWT login/refresh, /me, change password
+  accounts/          User, Position, PositionPermission, JWT auth, and the owner's staff and Position APIs
   companies/         Company model
   businesses/        Business model (Head Office, Branch, Independent)
-  common/            Custom JWT authentication class and DRF permission classes
+  common/            JWT authentication class, permissions, throttling, pagination, shared errors
+  inventory/         Inventory foundation (products, stock, transfers)
+  payroll/           Salaries and payroll records
 ```
 
 ## Setup
@@ -210,14 +216,120 @@ Two things to configure for production:
 - **Shared cache.** Counters are stored in Django's cache, which is per-process by default, so each worker would count separately. Set `REDIS_URL` so every worker shares one counter. Without it the app falls back to the in-memory cache, which is fine for development and tests.
 - **`NUM_PROXIES`.** With the default `0`, the client IP is the socket address and `X-Forwarded-For` is ignored, because clients can spoof it to dodge the limit. Behind one reverse proxy such as nginx, set `NUM_PROXIES=1`, otherwise every request appears to come from the proxy's IP and clients share one limit.
 
+## Owner setup and first login
+
+1. A Super Admin creates the owner in Django Admin (`/admin/` > Users > Add user): set the username and a temporary password, choose role **Owner**, and pick either the **company** (for a company owner, who signs in with the Head Office's business code) or the **business** (for a Branch or Independent business owner).
+2. **Must change password** is ticked by default on new users created there. Leave it ticked.
+3. Give the owner three things: the **business code**, the **username**, and the **temporary password**.
+4. At first login the owner is signed in but every API except `GET /me/` and `POST /change-password/` returns `403` with `code: "password_change_required"` (see [Forced password change](#forced-password-change)). The app should show the change-password screen.
+5. After changing the password all sessions are revoked, so the app signs the owner in again with the new password.
+
+Owners cannot be created, edited or deleted through the API. Only Django Admin does that.
+
+## Team management API (owner only)
+
+Everything below is limited to the **owner** of the active business, and works on the team of that business:
+
+- A company owner signed in to the **Head Office** manages the company's users, with Positions that belong to the Head Office.
+- A **Branch** or **Independent business** owner manages the users of that business.
+- A company owner signed in to a **Branch** is read-only (`403` on writes), like everywhere else.
+
+Admins, accountants and staff get `403`. Records of another company or business return `404`.
+
+### Staff
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/staff/` | List the team. Filters: `role`, `is_active`, `position`. Search: `search=`. Paginated |
+| `POST` | `/staff/` | Add a team member |
+| `GET`, `PATCH` | `/staff/{id}/` | View, or edit name, email, phone, role and Position |
+| `DELETE` | `/staff/{id}/` | **Deactivate** (not erase): they cannot sign in and their sessions end. History stays |
+| `POST` | `/staff/{id}/reactivate/` | Bring a deactivated person back |
+| `POST` | `/staff/{id}/reset-password/` | Set a new temporary password; the person must change it at next login |
+
+Adding a person:
+
+```json
+{
+  "username": "ram",
+  "first_name": "Ram",
+  "last_name": "Thapa",
+  "role": "staff",
+  "position": 3
+}
+```
+
+- `role` is `staff`, `accountant` or `admin`. Staff must have an active `position`; the others must not.
+- `password` is optional. If left out, the server generates a random one and returns it **once** as `temporary_password`. Either way the person must change it at first login.
+- Usernames are unique within the company (Head Office and its Branches together), ignoring case.
+- The username cannot be changed later.
+
+### Positions
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/positions/` | List or create Positions with their module permissions |
+| `GET`, `PATCH`, `DELETE` | `/positions/{id}/` | View, edit, or delete a Position |
+| `GET` | `/positions/modules/` | The modules a Position can grant access to |
+
+```json
+{
+  "name": "Cashier",
+  "permissions": [
+    {"module": "sales", "can_view": true, "can_create": true},
+    {"module": "inventory", "can_view": true}
+  ]
+}
+```
+
+- Modules not listed in an update keep their current permissions, and modules listed are set to exactly what is sent.
+- `can_create`, `can_update` or `can_delete` require `can_view`.
+- A Position still used by staff cannot be deleted (`409`, `position_in_use`) or deactivated; move the staff first.
+
+## Payroll API (owner only)
+
+Same scope rules as the team management API. Money is sent and returned as strings such as `"30000.00"`. The server calculates the net salary; any `net_salary` sent by a client is ignored.
+
+```
+net salary = basic salary + allowances + bonus - deductions - advance deduction
+```
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/payroll/salaries/` | Salaries of the team |
+| `GET`, `PUT` | `/payroll/salaries/{staff_id}/` | View, or set or change one person's `basic_salary` and `allowances` |
+| `GET`, `POST` | `/payroll/records/` | List records (filters: `status`, `staff`, `period_start__gte`, `paid_on__gte` and similar) or create one |
+| `GET`, `PATCH`, `DELETE` | `/payroll/records/{id}/` | View, edit or delete a **draft** |
+| `POST` | `/payroll/records/generate/` | Create a draft for every active person who has a salary, for a period |
+| `POST` | `/payroll/records/{id}/pay/` | Mark paid |
+| `POST` | `/payroll/records/{id}/void/` | Void a paid record, with a reason |
+
+Typical monthly flow:
+
+1. Set each person's salary once with `PUT /payroll/salaries/{staff_id}/`.
+2. Each month call `POST /payroll/records/generate/` with `{"period_start": "2026-01-01", "period_end": "2026-01-31"}`. The response lists what was `created` and who was `skipped` (`no_salary` or `already_exists`).
+3. Adjust a draft with `PATCH` (`bonus`, `deductions`, `advance_deduction`, `notes`).
+4. Pay with `POST .../pay/` and `{"payment_method": "cash", "paid_on": "2026-01-31", "payment_reference": "..."}`. The method is `cash`, `bank` or `online`; the date defaults to today and cannot be in the future.
+
+Rules:
+
+- A record keeps its own copy of the amounts, so changing a salary later never changes past records.
+- A person cannot have two live records for overlapping periods.
+- A paid record is locked (`409`, `document_not_editable`). To correct it, void it with a reason and create a new one. Voided records stay on file with who voided them and why.
+- Deductions plus advance recovery cannot exceed the pay.
+
+## Lists
+
+Every list endpoint is paginated: `?page=2&page_size=50` (default 25, maximum 100). The response has `count`, `next`, `previous` and `results`.
+
 ## Tests
 
 ```
 python manage.py test
 ```
 
-The settings use PostgreSQL, so the database user needs permission to create a test database. Current tests cover tenant login rules, token refresh revalidation, and module permissions.
+The settings use PostgreSQL, so the database user needs permission to create a test database. Tests cover login and token rules, throttling, permissions, the owner's staff and Position management, payroll, and inventory.
 
 ## Django Admin
 
-Available at `/admin/` for Super Admin users to manage companies, businesses, users, and Positions (module permissions are edited inline on each Position).
+Available at `/admin/` for Super Admin users to manage companies, businesses, users (including creating owners, see [Owner setup and first login](#owner-setup-and-first-login)), and Positions (module permissions are edited inline on each Position). Payroll records are read-only there; they are changed through the API so every change is validated and attributed.

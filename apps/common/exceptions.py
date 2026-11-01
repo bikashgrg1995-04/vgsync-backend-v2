@@ -1,4 +1,5 @@
-from rest_framework.exceptions import PermissionDenied
+from rest_framework import status
+from rest_framework.exceptions import APIException, PermissionDenied
 
 
 class PasswordChangeRequired(PermissionDenied):
@@ -16,5 +17,25 @@ class PasswordChangeRequired(PermissionDenied):
             detail={
                 "detail": "You must change your password before continuing.",
                 "code": self.default_code,
+            }
+        )
+
+
+class Conflict(APIException):
+    """
+    The request is valid but conflicts with the current state of the data
+    (409), for example deleting a Position that still has staff assigned.
+
+    The body is ``{"detail": "...", "code": "..."}``.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "conflict"
+
+    def __init__(self, detail, code=None):
+        super().__init__(
+            detail={
+                "detail": detail,
+                "code": code or self.default_code,
             }
         )
