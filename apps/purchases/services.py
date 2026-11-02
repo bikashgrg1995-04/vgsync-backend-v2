@@ -18,7 +18,13 @@ from apps.common.exceptions import Conflict
 from apps.inventory.models import StockMovement
 from apps.inventory.services.stock import create_stock_movement
 
-from .models import Purchase, PurchaseItem, PurchasePayment, ZERO
+from .models import (
+    CreditSettlement,
+    Purchase,
+    PurchaseItem,
+    PurchasePayment,
+    ZERO,
+)
 
 CENT = Decimal("0.01")
 HUNDRED = Decimal("100")
@@ -76,6 +82,22 @@ def paid_total(purchase):
     )
 
 
+def credit_applied_total(purchase):
+    """Supplier credit already applied against this purchase."""
+    return (
+        purchase.credit_settlements.filter(
+            kind=CreditSettlement.Kind.ADJUSTMENT,
+            status=CreditSettlement.Status.ACTIVE,
+        ).aggregate(total=Sum("amount"))["total"]
+        or ZERO
+    )
+
+
+def settled_total(purchase):
+    """Paid in money plus credit applied: what no longer has to be paid."""
+    return paid_total(purchase) + credit_applied_total(purchase)
+
+
 def payment_status(net_total, paid):
     """``unpaid``, ``partial`` or ``paid``."""
     if paid >= net_total:
@@ -88,12 +110,12 @@ def payment_status(net_total, paid):
 # Create, edit, cancel
 # ---------------------------------------------------------------------------
 
-def _next_number(business):
-    # Locking the business row makes two simultaneous purchases take
+def next_number(business, model=Purchase):
+    # Locking the business row makes two simultaneous documents take
     # different numbers.
     Business.objects.select_for_update().get(pk=business.pk)
 
-    last = Purchase.objects.filter(business=business).aggregate(
+    last = model.objects.filter(business=business).aggregate(
         last=Max("number")
     )["last"]
 
@@ -134,7 +156,7 @@ def create_purchase(*, business, user, items, **header):
 
     purchase = Purchase.objects.create(
         business=business,
-        number=_next_number(business),
+        number=next_number(business),
         created_by=user,
         **header,
         **_header_fields(totals),
@@ -184,13 +206,13 @@ def update_purchase(*, purchase, items=None, **header):
         purchase.freight_amount,
     )
 
-    paid = paid_total(purchase)
+    settled = settled_total(purchase)
 
-    if totals["net_total"] < paid:
+    if totals["net_total"] < settled:
         raise serializers.ValidationError({
             "items": (
-                f"The new total is less than the {paid} already paid. "
-                "Void a payment first."
+                f"The new total is less than the {settled} already paid or "
+                "covered by credit. Void a payment first."
             )
         })
 
@@ -210,9 +232,13 @@ def update_purchase(*, purchase, items=None, **header):
 def cancel_purchase(*, purchase, user, reason):
     purchase = _lock_draft(purchase)
 
-    if purchase.payments.filter(status=PurchasePayment.Status.ACTIVE).exists():
+    if (
+        purchase.payments.filter(status=PurchasePayment.Status.ACTIVE).exists()
+        or credit_applied_total(purchase) > 0
+    ):
         raise Conflict(
-            "Void the payments of this purchase before cancelling it.",
+            "Void the payments and applied credit of this purchase before "
+            "cancelling it.",
             code="payments_exist",
         )
 
@@ -282,14 +308,14 @@ def create_payment(*, purchase, user, amount, paid_on, method,
             "A cancelled purchase cannot be paid.", code="invalid_status"
         )
 
-    paid = paid_total(purchase)
+    settled = settled_total(purchase)
     amount = money(amount)
 
-    if paid + amount > purchase.net_total:
+    if settled + amount > purchase.net_total:
         raise serializers.ValidationError({
             "amount": (
                 f"This is more than is still owed "
-                f"({purchase.net_total - paid})."
+                f"({purchase.net_total - settled})."
             )
         })
 

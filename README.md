@@ -16,7 +16,7 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Payroll: monthly and daily pay, payments, advances, remaining and carried-over balances (owner only) | API |
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
-| Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments (needs the `purchases` permission) | API |
+| Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments, purchase returns and supplier credit (needs the `purchases` permission) | API |
 | Company / business management APIs | Not yet implemented |
 | Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
@@ -352,7 +352,7 @@ draft  --receive-->  received          (stock goes up, once; the purchase is loc
 draft  --cancel--->  cancelled         (no effect on stock)
 ```
 
-A draft can be edited freely and has no effect on stock. `receive` adds every line to the business's stock through the inventory stock service (one `purchase_receipt` movement per line, referencing `PUR-000001`), all or nothing, and only once. A received purchase cannot be edited or cancelled; purchase returns will handle corrections.
+A draft can be edited freely and has no effect on stock. `receive` adds every line to the business's stock through the inventory stock service (one `purchase_receipt` movement per line, referencing `PUR-000001`), all or nothing, and only once. A received purchase cannot be edited or cancelled; corrections are done with a purchase return (below).
 
 **Totals** are always calculated by the server from the lines, in this order (a total sent by a client is ignored):
 
@@ -404,6 +404,39 @@ Rules:
 - Product prices are not changed by purchases, and no sale price is derived from them.
 - Suppliers belong to one business. Purchases, suppliers and payments of one business are never visible to another.
 
+### Purchase returns and supplier credit
+
+Sending goods back to a supplier does not always bring money back: the supplier may refund it, or send other goods instead. So a return only creates **credit**, kept apart from what you owe.
+
+```
+return  -->  stock goes down, credit goes up           (no money moves, no expense changes)
+credit  -->  refund      supplier pays cash back       (reduces net spending)
+        -->  adjustment  set against a later purchase  (replacement goods; no cash moves)
+```
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/purchases/returns/` | List (filters: `purchase`, `supplier`, `status`) or return goods of a **received** purchase |
+| `GET` | `/purchases/returns/{id}/` | View a return (`PRT-000001`) |
+| `POST` | `/purchases/returns/{id}/void/` | Undo a return, with a `reason`: goods go back into stock and the credit is removed |
+| `GET`, `POST` | `/purchases/credits/` | List (filters: `supplier`, `kind`, `status`) or use credit |
+| `POST` | `/purchases/credits/{id}/void/` | Undo a refund or adjustment, with a `reason` |
+
+Return: `{"purchase": 5, "reason": "Wrong specification", "items": [{"purchase_item": 11, "quantity": "4", "stock_condition": "good"}]}`. `stock_condition` is `good` (default) or `damaged`, the stock the goods are taken from.
+
+Use credit with `POST /purchases/credits/`:
+
+- Refund: `{"supplier": 2, "kind": "refund", "amount": "400.00", "method": "bank"}`.
+- Replacement goods: enter the replacement as a normal purchase, then `{"supplier": 2, "kind": "adjustment", "amount": "400.00", "purchase": 9}`. The purchase's `remaining_amount` drops and `credit_applied` shows it.
+
+Rules:
+
+- A line must belong to the chosen purchase, cannot be listed twice, and cannot be returned beyond what is left (`returnable_quantity` on each line). Goods already sold cannot be returned: the stock must still be there, otherwise nothing is returned.
+- Credit for a line is its value minus its share of the discount, plus VAT. Freight is never credited, and credits for a purchase never add up to more than its goods.
+- A supplier shows `credit_balance` separately from `outstanding`. Credit cannot go below zero, and an adjustment cannot exceed what the purchase still owes.
+- A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund or adjustment first.
+- Returns, refunds and adjustments are never edited or deleted.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.
@@ -413,9 +446,11 @@ Every payroll payment is recorded as a `salary` expense, and every supplier paym
 | `GET`, `POST` | `/finance/expenses/` | List (filters: `category`, `status`, `payment_method`, `expense_date__gte`, `expense_date__lte`) or add an expense |
 | `GET`, `PATCH` | `/finance/expenses/{id}/` | View or change a manual expense |
 | `POST` | `/finance/expenses/{id}/void/` | Void a manual expense, with a reason |
-| `GET` | `/finance/expenses/summary/` | Totals of active expenses by category, for the same filters |
+| `GET` | `/finance/expenses/summary/` | `total`, `purchase_refunds`, `net_total` and `by_category` of active expenses, for the same filters |
 
 Categories: `salary`, `purchase`, `rent`, `utilities`, `transport`, `marketing`, `maintenance`, `other`. Salary and purchase expenses come from payments and are read-only here (`409`, `payment_expense_locked`); void the payment instead. Expenses belong to the active business, so a company owner sees Head Office expenses and a branch owner sees the branch's.
+
+Supplier refunds are cash coming back, so the summary subtracts them: `net_total = total - purchase_refunds`. The original `purchase` expenses stay untouched, and a return or an adjustment never changes expenses.
 
 ## Lists
 

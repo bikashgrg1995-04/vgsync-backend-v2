@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db.models import Count, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -74,7 +75,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def summary(self, request):
-        """Totals by category for the filtered, active expenses."""
+        """
+        Totals by category for the filtered, active expenses, and the same
+        total net of supplier refunds (``net_total``).
+        """
         queryset = self.filter_queryset(self.get_queryset()).filter(
             status=Expense.Status.ACTIVE
         )
@@ -96,5 +100,41 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         total = sum((row["total"] for row in rows), Decimal("0"))
 
+        refunds = self._purchase_refunds(request)
+
         # Money goes out as strings, like everywhere else in the API.
-        return Response({"total": f"{total:.2f}", "by_category": by_category})
+        return Response({
+            "total": f"{total:.2f}",
+            "purchase_refunds": f"{refunds:.2f}",
+            "net_total": f"{total - refunds:.2f}",
+            "by_category": by_category,
+        })
+
+    @staticmethod
+    def _purchase_refunds(request):
+        """
+        Cash that suppliers paid back for returned goods in the same period.
+        It reduces what was really spent. Returning goods, or applying credit
+        to a purchase, moves no cash and changes nothing here.
+        """
+        from apps.purchases.models import CreditSettlement
+
+        query = request.query_params
+
+        # A category filter other than purchase excludes refunds.
+        if query.get("category") not in (None, "", Expense.Category.PURCHASE):
+            return Decimal("0")
+
+        refunds = CreditSettlement.objects.filter(
+            supplier__business=request.active_business,
+            kind=CreditSettlement.Kind.REFUND,
+            status=CreditSettlement.Status.ACTIVE,
+        )
+
+        if day := parse_date(query.get("expense_date__gte") or ""):
+            refunds = refunds.filter(settled_on__gte=day)
+
+        if day := parse_date(query.get("expense_date__lte") or ""):
+            refunds = refunds.filter(settled_on__lte=day)
+
+        return refunds.aggregate(total=Sum("amount"))["total"] or Decimal("0")

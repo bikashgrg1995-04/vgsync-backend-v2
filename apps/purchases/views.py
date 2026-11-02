@@ -9,6 +9,7 @@ from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import (
     DecimalField,
+    Prefetch,
     ExpressionWrapper,
     F,
     OuterRef,
@@ -27,11 +28,27 @@ from rest_framework.response import Response
 
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 
-from .models import Purchase, PurchasePayment, Supplier
+from .models import (
+    CreditSettlement,
+    Purchase,
+    PurchaseItem,
+    PurchasePayment,
+    PurchaseReturn,
+    Supplier,
+)
+from .returns import (
+    create_return,
+    create_settlement,
+    void_return,
+    void_settlement,
+)
 from .serializers import (
+    CreditSettlementSerializer,
     PurchaseDetailSerializer,
     PurchasePatchSerializer,
     PurchasePaymentSerializer,
+    PurchaseReturnSerializer,
+    PurchaseReturnWriteSerializer,
     PurchaseSerializer,
     PurchaseWriteSerializer,
     ReasonSerializer,
@@ -92,8 +109,11 @@ class SupplierViewSet(PurchaseBaseViewSet):
     Suppliers of the active business, with what is owed to each one.
     ``DELETE`` deactivates; a supplier with purchases is never removed.
 
-    ``outstanding`` counts received purchases not yet paid for;
-    ``advance_paid`` is money already paid on purchases not yet received.
+    ``outstanding`` counts received purchases not yet paid for (after
+    payments and applied credit); ``advance_paid`` is money already paid on
+    purchases not yet received; ``credit_balance`` is the credit from
+    returned goods that has not been refunded or applied yet. It is kept
+    apart from ``outstanding``.
     """
 
     serializer_class = SupplierSerializer
@@ -105,30 +125,71 @@ class SupplierViewSet(PurchaseBaseViewSet):
     ordering = ("name",)
 
     def get_queryset(self):
-        received = Purchase.objects.filter(
-            supplier=OuterRef("pk"), status=Purchase.Status.RECEIVED
-        )
-        paid_on_received = PurchasePayment.objects.filter(
-            purchase__supplier=OuterRef("pk"),
-            purchase__status=Purchase.Status.RECEIVED,
-            status=PurchasePayment.Status.ACTIVE,
-        )
-        paid_on_draft = PurchasePayment.objects.filter(
-            purchase__supplier=OuterRef("pk"),
-            purchase__status=Purchase.Status.DRAFT,
-            status=PurchasePayment.Status.ACTIVE,
-        )
+        active_payment = PurchasePayment.Status.ACTIVE
+        active_credit = CreditSettlement.Status.ACTIVE
+        received = Purchase.Status.RECEIVED
 
         return Supplier.objects.filter(
             business=self.request.active_business
         ).annotate(
-            total_purchased=sum_of(received, "supplier"),
-            _paid=sum_of(paid_on_received, "purchase__supplier", "amount"),
-            advance_paid=sum_of(paid_on_draft, "purchase__supplier", "amount"),
+            total_purchased=sum_of(
+                Purchase.objects.filter(
+                    supplier=OuterRef("pk"), status=received
+                ),
+                "supplier",
+            ),
+            _paid=sum_of(
+                PurchasePayment.objects.filter(
+                    purchase__supplier=OuterRef("pk"),
+                    purchase__status=received,
+                    status=active_payment,
+                ),
+                "purchase__supplier",
+                "amount",
+            ),
+            _applied=sum_of(
+                CreditSettlement.objects.filter(
+                    supplier=OuterRef("pk"),
+                    kind=CreditSettlement.Kind.ADJUSTMENT,
+                    purchase__status=received,
+                    status=active_credit,
+                ),
+                "supplier",
+                "amount",
+            ),
+            advance_paid=sum_of(
+                PurchasePayment.objects.filter(
+                    purchase__supplier=OuterRef("pk"),
+                    purchase__status=Purchase.Status.DRAFT,
+                    status=active_payment,
+                ),
+                "purchase__supplier",
+                "amount",
+            ),
+            _credit_earned=sum_of(
+                PurchaseReturn.objects.filter(
+                    supplier=OuterRef("pk"),
+                    status=PurchaseReturn.Status.ACTIVE,
+                ),
+                "supplier",
+                "credit_amount",
+            ),
+            _credit_used=sum_of(
+                CreditSettlement.objects.filter(
+                    supplier=OuterRef("pk"), status=active_credit
+                ),
+                "supplier",
+                "amount",
+            ),
         ).annotate(
             outstanding=ExpressionWrapper(
-                F("total_purchased") - F("_paid"), output_field=MONEY_FIELD
-            )
+                F("total_purchased") - F("_paid") - F("_applied"),
+                output_field=MONEY_FIELD,
+            ),
+            credit_balance=ExpressionWrapper(
+                F("_credit_earned") - F("_credit_used"),
+                output_field=MONEY_FIELD,
+            ),
         )
 
     def perform_create(self, serializer):
@@ -185,29 +246,58 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         return PurchaseSerializer
 
     def get_queryset(self):
-        paid = Coalesce(
-            Sum(
-                "payments__amount",
-                filter=Q(payments__status=PurchasePayment.Status.ACTIVE),
+        paid = sum_of(
+            PurchasePayment.objects.filter(
+                purchase=OuterRef("pk"), status=PurchasePayment.Status.ACTIVE
             ),
-            ZERO,
+            "purchase",
+            "amount",
+        )
+        credit = sum_of(
+            CreditSettlement.objects.filter(
+                purchase=OuterRef("pk"),
+                kind=CreditSettlement.Kind.ADJUSTMENT,
+                status=CreditSettlement.Status.ACTIVE,
+            ),
+            "purchase",
+            "amount",
+        )
+
+        items = PurchaseItem.objects.select_related("product").annotate(
+            returned=Coalesce(
+                Sum(
+                    "return_items__quantity",
+                    filter=Q(
+                        return_items__purchase_return__status=PurchaseReturn.Status.ACTIVE
+                    ),
+                ),
+                Value(
+                    Decimal("0.000"),
+                    output_field=DecimalField(max_digits=14, decimal_places=3),
+                ),
+            )
         )
 
         queryset = (
             Purchase.objects.filter(business=self.request.active_business)
             .select_related("supplier")
-            .prefetch_related("items__product", "payments")
-            .annotate(paid=paid)
+            .prefetch_related(Prefetch("items", queryset=items), "payments")
+            .annotate(paid=paid, credit=credit)
+            .annotate(
+                settled=ExpressionWrapper(
+                    F("paid") + F("credit"), output_field=MONEY_FIELD
+                )
+            )
         )
 
         wanted = self.request.query_params.get("payment_status")
 
         if wanted == "unpaid":
-            queryset = queryset.filter(paid=0)
+            queryset = queryset.filter(settled=0)
         elif wanted == "partial":
-            queryset = queryset.filter(paid__gt=0, paid__lt=F("net_total"))
+            queryset = queryset.filter(settled__gt=0, settled__lt=F("net_total"))
         elif wanted == "paid":
-            queryset = queryset.filter(paid__gte=F("net_total"))
+            queryset = queryset.filter(settled__gte=F("net_total"))
 
         return queryset
 
@@ -333,3 +423,137 @@ class PurchasePaymentViewSet(PurchaseBaseViewSet):
         )
 
         return Response(self.get_serializer(payment).data)
+
+
+# ---------------------------------------------------------------------------
+# Returns to the supplier
+# ---------------------------------------------------------------------------
+
+class PurchaseReturnViewSet(PurchaseBaseViewSet):
+    """
+    Goods sent back to the supplier from a received purchase. A return takes
+    the goods out of stock and creates a credit with the supplier (shown
+    separately as ``credit_balance`` on the supplier). A return cannot be
+    edited or deleted; void it with a reason.
+    """
+
+    serializer_class = PurchaseReturnSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "status": ["exact"],
+        "purchase": ["exact"],
+        "supplier": ["exact"],
+        "return_date": ["gte", "lte"],
+    }
+    search_fields = ("reason", "supplier__name", "purchase__bill_no")
+    ordering_fields = ("return_date", "number", "credit_amount", "created_at")
+    ordering = ("-return_date", "-number")
+
+    def get_queryset(self):
+        return (
+            PurchaseReturn.objects.filter(business=self.request.active_business)
+            .select_related("purchase", "supplier")
+            .prefetch_related(
+                "items__product", "items__purchase_item"
+            )
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = PurchaseReturnWriteSerializer(
+            data=request.data, context=self.get_serializer_context()
+        )
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        ret = create_return(
+            purchase=data["purchase"],
+            user=request.user,
+            return_date=data.get("return_date", timezone.localdate()),
+            reason=data["reason"],
+            notes=data.get("notes", ""),
+            items=data["items"],
+        )
+
+        return Response(
+            self.get_serializer(self.get_queryset().get(pk=ret.pk)).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        serializer = ReasonSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        ret = void_return(
+            purchase_return=self.get_object(),
+            user=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+
+        return Response(self.get_serializer(self.get_queryset().get(pk=ret.pk)).data)
+
+
+# ---------------------------------------------------------------------------
+# Using the credit
+# ---------------------------------------------------------------------------
+
+class CreditSettlementViewSet(PurchaseBaseViewSet):
+    """
+    Using a supplier's credit: ``refund`` (the supplier paid money back) or
+    ``adjustment`` (applied to a purchase so it owes less; this is also how
+    replacement goods are paid for). Cannot be edited; void with a reason.
+    """
+
+    serializer_class = CreditSettlementSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "status": ["exact"],
+        "supplier": ["exact"],
+        "kind": ["exact"],
+        "purchase": ["exact"],
+        "settled_on": ["gte", "lte"],
+    }
+    search_fields = ("reference", "supplier__name")
+    ordering_fields = ("settled_on", "amount", "created_at")
+    ordering = ("-settled_on", "-id")
+
+    def get_queryset(self):
+        return CreditSettlement.objects.filter(
+            supplier__business=self.request.active_business
+        ).select_related("supplier", "purchase")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        settlement = create_settlement(
+            supplier=data["supplier"],
+            user=request.user,
+            kind=data["kind"],
+            amount=data["amount"],
+            settled_on=data.get("settled_on", timezone.localdate()),
+            purchase=data.get("purchase"),
+            method=data.get("method", ""),
+            reference=data.get("reference", ""),
+            notes=data.get("notes", ""),
+        )
+
+        return Response(
+            self.get_serializer(settlement).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        serializer = ReasonSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        settlement = void_settlement(
+            settlement=self.get_object(),
+            user=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+
+        return Response(self.get_serializer(settlement).data)

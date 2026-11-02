@@ -272,3 +272,219 @@ class PurchasePayment(models.Model):
 
     def __str__(self):
         return f"{self.purchase} paid {self.amount} on {self.paid_on}"
+
+
+# ---------------------------------------------------------------------------
+# Returns to the supplier and the credit they create
+# ---------------------------------------------------------------------------
+
+class PurchaseReturn(models.Model):
+    """
+    Goods sent back to the supplier from a received purchase.
+
+    Returning goods takes them out of stock and gives the business a
+    **credit** with the supplier (the value of what was returned, including
+    its share of the discount and VAT; freight is not credited). The credit
+    is kept apart from what the business owes; it is used up by a cash refund
+    from the supplier or by applying it to a purchase (see
+    ``CreditSettlement``).
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="purchase_returns",
+    )
+    # 1, 2, 3 ... within the business; shown as PRT-000001.
+    number = models.PositiveIntegerField()
+    purchase = models.ForeignKey(
+        Purchase,
+        on_delete=models.PROTECT,
+        related_name="returns",
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.PROTECT,
+        related_name="returns",
+    )
+    return_date = models.DateField()
+    reason = models.TextField()
+    notes = models.TextField(blank=True)
+    credit_amount = models.DecimalField(**MONEY, default=ZERO)
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-return_date", "-number"]
+        indexes = [
+            models.Index(fields=["business", "status", "return_date"]),
+            models.Index(fields=["supplier", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["business", "number"],
+                name="unique_purchase_return_number_per_business",
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_amount__gte=0),
+                name="purchase_return_credit_non_negative",
+            ),
+        ]
+
+    @property
+    def return_no(self):
+        return f"PRT-{self.number:06d}"
+
+    def __str__(self):
+        return self.return_no
+
+
+class PurchaseReturnItem(models.Model):
+    purchase_return = models.ForeignKey(
+        PurchaseReturn,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    purchase_item = models.ForeignKey(
+        PurchaseItem,
+        on_delete=models.PROTECT,
+        related_name="return_items",
+    )
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        related_name="purchase_return_items",
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # Which stock the goods are taken from.
+    stock_condition = models.CharField(max_length=10, default="good")
+    credit_amount = models.DecimalField(**MONEY, default=ZERO)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="purchase_return_item_quantity_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_amount__gte=0),
+                name="purchase_return_item_credit_non_negative",
+            ),
+        ]
+
+
+class CreditSettlement(models.Model):
+    """
+    Use of a supplier's credit. Two ways, both reduce the credit:
+
+    * ``refund``: the supplier paid money back. This is cash coming in, so it
+      reduces net purchase spending in the expenses summary.
+    * ``adjustment``: the credit is applied against a purchase, so that
+      purchase owes less. No cash moves. This is also how replacement goods
+      are paid for: receive them as a purchase and apply the credit to it.
+
+    Never edited or deleted; a mistake is voided with a reason.
+    """
+
+    class Kind(models.TextChoices):
+        REFUND = "refund", "Refund received"
+        ADJUSTMENT = "adjustment", "Applied to a purchase"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.PROTECT,
+        related_name="credit_settlements",
+    )
+    kind = models.CharField(max_length=12, choices=Kind.choices)
+    amount = models.DecimalField(**MONEY)
+    settled_on = models.DateField()
+    # Only for an adjustment: the purchase the credit is applied to.
+    purchase = models.ForeignKey(
+        Purchase,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="credit_settlements",
+    )
+    # Only for a refund.
+    method = models.CharField(max_length=10, blank=True)
+    reference = models.CharField(max_length=100, blank=True)
+    notes = models.CharField(max_length=200, blank=True)
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-settled_on", "-id"]
+        indexes = [
+            models.Index(fields=["supplier", "status"]),
+            models.Index(fields=["purchase", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="credit_settlement_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(kind="adjustment", purchase__isnull=False)
+                    | Q(kind="refund", purchase__isnull=True)
+                ),
+                name="credit_settlement_purchase_matches_kind",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.supplier} {self.kind} {self.amount}"

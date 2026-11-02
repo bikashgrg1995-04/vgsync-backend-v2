@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import Purchase, PurchaseItem, PurchasePayment, Supplier
+from .models import (
+    CreditSettlement,
+    Purchase,
+    PurchaseItem,
+    PurchasePayment,
+    PurchaseReturn,
+    Supplier,
+)
 
 
 @admin.register(Supplier)
@@ -47,3 +54,16 @@ class PurchaseAdmin(ReadOnlyAdmin):
 class PurchasePaymentAdmin(ReadOnlyAdmin):
     list_display = ("purchase", "amount", "paid_on", "method", "status")
     list_filter = ("method", "status")
+
+
+@admin.register(PurchaseReturn)
+class PurchaseReturnAdmin(ReadOnlyAdmin):
+    list_display = ("return_no", "business", "supplier", "return_date", "credit_amount", "status")
+    list_filter = ("status", "business")
+    search_fields = ("supplier__name", "reason")
+
+
+@admin.register(CreditSettlement)
+class CreditSettlementAdmin(ReadOnlyAdmin):
+    list_display = ("supplier", "kind", "amount", "settled_on", "status")
+    list_filter = ("kind", "status")

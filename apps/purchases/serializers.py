@@ -5,8 +5,21 @@ from rest_framework import serializers
 
 from apps.inventory.services.products import get_products_for_business
 
-from .models import Purchase, PurchaseItem, PurchasePayment, Supplier
-from .services import calculate_totals, paid_total, payment_status
+from .models import (
+    CreditSettlement,
+    Purchase,
+    PurchaseItem,
+    PurchasePayment,
+    PurchaseReturn,
+    PurchaseReturnItem,
+    Supplier,
+)
+from .services import (
+    calculate_totals,
+    credit_applied_total,
+    paid_total,
+    payment_status,
+)
 
 MONEY = {"max_digits": 12, "decimal_places": 2}
 POSITIVE = {**MONEY, "min_value": Decimal("0.01")}
@@ -36,6 +49,9 @@ class SupplierSerializer(serializers.ModelSerializer):
     advance_paid = serializers.DecimalField(
         **MONEY, read_only=True, default=Decimal("0.00")
     )
+    credit_balance = serializers.DecimalField(
+        **MONEY, read_only=True, default=Decimal("0.00")
+    )
 
     class Meta:
         model = Supplier
@@ -52,6 +68,7 @@ class SupplierSerializer(serializers.ModelSerializer):
             "total_purchased",
             "outstanding",
             "advance_paid",
+            "credit_balance",
             "created_at",
             "updated_at",
         )
@@ -207,6 +224,8 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
     stock_no = serializers.CharField(source="product.stock_no", read_only=True)
     product_name = serializers.CharField(source="product.name", read_only=True)
     unit = serializers.CharField(source="product.unit", read_only=True)
+    returned_quantity = serializers.SerializerMethodField()
+    returnable_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseItem
@@ -219,7 +238,31 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
             "quantity",
             "unit_price",
             "line_total",
+            "returned_quantity",
+            "returnable_quantity",
         )
+
+    def _returned(self, obj):
+        # The view annotates this; fall back to the database otherwise.
+        annotated = getattr(obj, "returned", None)
+
+        if annotated is not None:
+            return annotated
+
+        from django.db.models import Sum
+
+        return (
+            obj.return_items.filter(
+                purchase_return__status=PurchaseReturn.Status.ACTIVE
+            ).aggregate(total=Sum("quantity"))["total"]
+            or Decimal("0")
+        )
+
+    def get_returned_quantity(self, obj):
+        return f"{self._returned(obj):.3f}"
+
+    def get_returnable_quantity(self, obj):
+        return f"{obj.quantity - self._returned(obj):.3f}"
 
 
 class PurchasePaymentSerializer(serializers.ModelSerializer):
@@ -269,6 +312,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
     items = PurchaseItemSerializer(many=True, read_only=True)
 
     paid_amount = serializers.SerializerMethodField()
+    credit_applied = serializers.SerializerMethodField()
     remaining_amount = serializers.SerializerMethodField()
     payment_status = serializers.SerializerMethodField()
 
@@ -291,6 +335,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "freight_amount",
             "net_total",
             "paid_amount",
+            "credit_applied",
             "remaining_amount",
             "payment_status",
             "notes",
@@ -307,14 +352,22 @@ class PurchaseSerializer(serializers.ModelSerializer):
 
         return annotated if annotated is not None else paid_total(obj)
 
+    def _credit(self, obj):
+        annotated = getattr(obj, "credit", None)
+
+        return annotated if annotated is not None else credit_applied_total(obj)
+
     def get_paid_amount(self, obj):
         return f"{self._paid(obj):.2f}"
 
+    def get_credit_applied(self, obj):
+        return f"{self._credit(obj):.2f}"
+
     def get_remaining_amount(self, obj):
-        return f"{obj.net_total - self._paid(obj):.2f}"
+        return f"{obj.net_total - self._paid(obj) - self._credit(obj):.2f}"
 
     def get_payment_status(self, obj):
-        return payment_status(obj.net_total, self._paid(obj))
+        return payment_status(obj.net_total, self._paid(obj) + self._credit(obj))
 
 
 class PurchaseDetailSerializer(PurchaseSerializer):
@@ -326,3 +379,190 @@ class PurchaseDetailSerializer(PurchaseSerializer):
 
 class ReasonSerializer(serializers.Serializer):
     reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+
+
+# ---------------------------------------------------------------------------
+# Returns to the supplier
+# ---------------------------------------------------------------------------
+
+class PurchaseItemField(serializers.PrimaryKeyRelatedField):
+    """A line of a purchase of the active business."""
+
+    default_error_messages = {
+        "does_not_exist": "This purchase line does not exist.",
+    }
+
+    def get_queryset(self):
+        return PurchaseItem.objects.filter(
+            purchase__business=self.context["request"].active_business
+        ).select_related("product")
+
+
+class PurchaseReturnItemInputSerializer(serializers.Serializer):
+    purchase_item = PurchaseItemField()
+    quantity = serializers.DecimalField(**QUANTITY)
+    stock_condition = serializers.ChoiceField(
+        choices=[("good", "Good"), ("damaged", "Damaged")],
+        default="good",
+        help_text="Which stock the goods are taken from.",
+    )
+
+
+class PurchaseReturnWriteSerializer(serializers.Serializer):
+    purchase = serializers.PrimaryKeyRelatedField(queryset=Purchase.objects.none())
+    return_date = serializers.DateField(required=False)
+    reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    items = PurchaseReturnItemInputSerializer(many=True, allow_empty=False, max_length=200)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        request = self.context.get("request")
+
+        if request is not None:
+            self.fields["purchase"].queryset = Purchase.objects.filter(
+                business=request.active_business
+            )
+
+    def validate_return_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+
+class PurchaseReturnItemSerializer(serializers.ModelSerializer):
+    stock_no = serializers.CharField(source="product.stock_no", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    unit_price = serializers.DecimalField(
+        source="purchase_item.unit_price", max_digits=12, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = PurchaseReturnItem
+        fields = (
+            "id",
+            "purchase_item",
+            "product",
+            "stock_no",
+            "product_name",
+            "quantity",
+            "unit_price",
+            "stock_condition",
+            "credit_amount",
+        )
+
+
+class PurchaseReturnSerializer(serializers.ModelSerializer):
+    return_no = serializers.CharField(read_only=True)
+    purchase_no = serializers.CharField(source="purchase.purchase_no", read_only=True)
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    items = PurchaseReturnItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PurchaseReturn
+        fields = (
+            "id",
+            "return_no",
+            "number",
+            "purchase",
+            "purchase_no",
+            "supplier",
+            "supplier_name",
+            "return_date",
+            "reason",
+            "notes",
+            "credit_amount",
+            "status",
+            "voided_at",
+            "void_reason",
+            "items",
+            "created_at",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Using the credit
+# ---------------------------------------------------------------------------
+
+class CreditSettlementSerializer(serializers.ModelSerializer):
+    supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.objects.none())
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    purchase = serializers.PrimaryKeyRelatedField(
+        queryset=Purchase.objects.none(), required=False, allow_null=True
+    )
+    purchase_no = serializers.SerializerMethodField()
+    kind = serializers.ChoiceField(choices=CreditSettlement.Kind.choices)
+    amount = serializers.DecimalField(**POSITIVE)
+    settled_on = serializers.DateField(required=False)
+    method = serializers.ChoiceField(
+        choices=PurchasePayment.Method.choices, required=False, allow_blank=True
+    )
+
+    class Meta:
+        model = CreditSettlement
+        fields = (
+            "id",
+            "supplier",
+            "supplier_name",
+            "kind",
+            "amount",
+            "settled_on",
+            "purchase",
+            "purchase_no",
+            "method",
+            "reference",
+            "notes",
+            "status",
+            "voided_at",
+            "void_reason",
+            "created_at",
+        )
+        read_only_fields = ("id", "status", "voided_at", "void_reason", "created_at")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        request = self.context.get("request")
+
+        if request is not None:
+            business = request.active_business
+            self.fields["supplier"].queryset = Supplier.objects.filter(business=business)
+            self.fields["purchase"].queryset = Purchase.objects.filter(business=business)
+
+    def get_purchase_no(self, obj):
+        return obj.purchase.purchase_no if obj.purchase_id else None
+
+    def validate_settled_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+    def validate(self, attrs):
+        kind = attrs["kind"]
+
+        if kind == CreditSettlement.Kind.ADJUSTMENT:
+            if not attrs.get("purchase"):
+                raise serializers.ValidationError(
+                    {"purchase": "Choose the purchase to apply the credit to."}
+                )
+
+            if attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "A method applies to refunds only."}
+                )
+
+        else:
+            if attrs.get("purchase"):
+                raise serializers.ValidationError(
+                    {"purchase": "A refund is not applied to a purchase."}
+                )
+
+            if not attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "Say how the refund was received."}
+                )
+
+        return attrs
