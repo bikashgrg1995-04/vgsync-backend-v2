@@ -14,6 +14,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower
 
 MONEY = {"max_digits": 12, "decimal_places": 2}
 ZERO = Decimal("0.00")
@@ -55,9 +56,72 @@ class Customer(models.Model):
         return self.name
 
 
+class BikeUnit(models.Model):
+    """
+    One physical bike, with its own chassis and engine number. A bike sale
+    sells units, never just a quantity. The unit belongs to the business
+    that holds it in stock and is marked sold when the sale is confirmed.
+    Registering a unit does not change stock; stock comes from purchases or
+    transfers, and there can never be more units in stock than the stock
+    balance of the model.
+    """
+
+    class Status(models.TextChoices):
+        IN_STOCK = "in_stock", "In stock"
+        SOLD = "sold", "Sold"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="bike_units",
+    )
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        related_name="bike_units",
+    )
+    chassis_no = models.CharField(max_length=60)
+    engine_no = models.CharField(max_length=60, blank=True)
+    color = models.CharField(max_length=40, blank=True)
+    notes = models.CharField(max_length=200, blank=True)
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.IN_STOCK,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["business", "product", "status"])]
+        constraints = [
+            # A chassis number is one physical bike, across all businesses.
+            models.UniqueConstraint(
+                Lower("chassis_no"), name="unique_bike_chassis_no"
+            ),
+            models.UniqueConstraint(
+                Lower("engine_no"),
+                condition=~Q(engine_no=""),
+                name="unique_bike_engine_no",
+            ),
+        ]
+
+    def __str__(self):
+        return self.chassis_no
+
+
 class Sale(models.Model):
     """
-    One sale. Every money figure is calculated by the server from the lines
+    One sale. ``sale_type`` says what is sold:
+
+    * ``stock``: products from stock.
+    * ``bike``: bike units, paid in full or by EMI.
+    * ``maintenance``: stock parts and service charges for a customer's bike.
+
+    Every money figure is calculated by the server from the lines
     (see ``services.calculate_totals``):
 
         subtotal  = sum of line totals
@@ -94,11 +158,43 @@ class Sale(models.Model):
     walk_in_name = models.CharField(max_length=150, blank=True)
     sale_date = models.DateField()
 
+    class SaleType(models.TextChoices):
+        STOCK = "stock", "Stock sale"
+        BIKE = "bike", "Bike sale"
+        MAINTENANCE = "maintenance", "Maintenance"
+
+    class PaymentMode(models.TextChoices):
+        FULL = "full", "Full payment"
+        EMI = "emi", "EMI"
+
+    sale_type = models.CharField(
+        max_length=12, choices=SaleType.choices, default=SaleType.STOCK
+    )
+
     status = models.CharField(
         max_length=10,
         choices=Status.choices,
         default=Status.DRAFT,
     )
+
+    # Bike sales only. With EMI the customer pays ``down_payment`` and then
+    # ``emi_months`` monthly instalments of ``emi_amount``. Whatever that
+    # adds up to above the net total is the ``finance_charge``.
+    payment_mode = models.CharField(
+        max_length=5, choices=PaymentMode.choices, default=PaymentMode.FULL
+    )
+    down_payment = models.DecimalField(**MONEY, default=ZERO)
+    emi_months = models.PositiveSmallIntegerField(null=True, blank=True)
+    emi_amount = models.DecimalField(**MONEY, null=True, blank=True)
+    first_emi_due = models.DateField(null=True, blank=True)
+    finance_charge = models.DecimalField(**MONEY, default=ZERO)
+
+    # When the customer promised to pay what is left (a credit sale).
+    due_date = models.DateField(null=True, blank=True)
+
+    # Maintenance only: the customer's bike.
+    vehicle_chassis_no = models.CharField(max_length=60, blank=True)
+    vehicle_reg_no = models.CharField(max_length=30, blank=True)
 
     subtotal = models.DecimalField(**MONEY, default=ZERO)
     discount_amount = models.DecimalField(**MONEY, default=ZERO)
@@ -172,7 +268,36 @@ class Sale(models.Model):
                 ),
                 name="sale_amounts_valid",
             ),
+            # EMI is for bike sales, with a down payment, a term and an amount.
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        payment_mode="full",
+                        down_payment=0,
+                        finance_charge=0,
+                        emi_months__isnull=True,
+                        emi_amount__isnull=True,
+                        first_emi_due__isnull=True,
+                    )
+                    | Q(
+                        payment_mode="emi",
+                        sale_type="bike",
+                        down_payment__gte=0,
+                        finance_charge__gte=0,
+                        emi_months__gte=1,
+                        emi_months__lte=120,
+                        emi_amount__gt=0,
+                        first_emi_due__isnull=False,
+                    )
+                ),
+                name="sale_emi_fields_valid",
+            ),
         ]
+
+    @property
+    def amount_due(self):
+        """What the customer has to pay in all: net total plus finance charge."""
+        return self.net_total + self.finance_charge
 
     @property
     def sale_no(self):
@@ -197,9 +322,22 @@ class SaleItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
     )
+    # Empty for a service charge (maintenance), which takes nothing from stock.
     product = models.ForeignKey(
         "inventory.Product",
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="sale_items",
+    )
+    # What a service charge is for.
+    description = models.CharField(max_length=200, blank=True)
+    # Set on bike sales: the exact bike sold.
+    bike_unit = models.ForeignKey(
+        BikeUnit,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
         related_name="sale_items",
     )
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
@@ -209,6 +347,14 @@ class SaleItem(models.Model):
     class Meta:
         ordering = ["id"]
         constraints = [
+            models.CheckConstraint(
+                condition=Q(product__isnull=False) | ~Q(description=""),
+                name="sale_item_has_product_or_description",
+            ),
+            models.CheckConstraint(
+                condition=Q(bike_unit__isnull=True) | Q(product__isnull=False),
+                name="sale_item_bike_has_product",
+            ),
             models.CheckConstraint(
                 condition=Q(quantity__gt=0),
                 name="sale_item_quantity_positive",
@@ -290,3 +436,127 @@ class SalePayment(models.Model):
 
     def __str__(self):
         return f"{self.sale} received {self.amount}"
+
+
+class EmiInstallment(models.Model):
+    """
+    One monthly instalment of an EMI sale, made when the sale is confirmed.
+    Instalments are not paid one by one: payments go to the sale, and the
+    money received after the down payment covers the instalments in order.
+    """
+
+    sale = models.ForeignKey(
+        Sale,
+        on_delete=models.CASCADE,
+        related_name="installments",
+    )
+    number = models.PositiveSmallIntegerField()
+    due_date = models.DateField()
+    amount = models.DecimalField(**MONEY)
+
+    class Meta:
+        ordering = ["number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["sale", "number"], name="unique_installment_number"
+            ),
+            models.CheckConstraint(
+                condition=Q(amount__gt=0), name="installment_amount_positive"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.sale} instalment {self.number}"
+
+
+class Followup(models.Model):
+    """
+    A call or visit to make. They are created by the system:
+
+    * ``maintenance_post``: 3 days after a maintenance sale, to ask whether
+      any issue came up after the service. What is noted here (``has_issue``
+      and the note) is shown on the 90-day follow-up.
+    * ``maintenance_due``: 90 days after a maintenance sale.
+    * ``emi_due``: one per EMI instalment, on its due date.
+    * ``credit_due``: when a sale was left partly unpaid.
+
+    A follow-up closes by itself once the money it was waiting for is
+    received (``auto_closed``) and opens again if that payment is voided. It
+    can also be marked done or skipped, with a note.
+    """
+
+    class Kind(models.TextChoices):
+        MAINTENANCE_POST = "maintenance_post", "Post-service check (3 days)"
+        MAINTENANCE_DUE = "maintenance_due", "Maintenance follow-up (90 days)"
+        EMI_DUE = "emi_due", "EMI instalment"
+        CREDIT_DUE = "credit_due", "Credit to receive"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        DONE = "done", "Done"
+        SKIPPED = "skipped", "Skipped"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="followups",
+    )
+    sale = models.ForeignKey(
+        Sale,
+        on_delete=models.PROTECT,
+        related_name="followups",
+    )
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="followups",
+    )
+    installment = models.OneToOneField(
+        EmiInstallment,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="followup",
+    )
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    due_date = models.DateField()
+    # What is expected for an instalment or a credit; empty for maintenance.
+    amount = models.DecimalField(**MONEY, null=True, blank=True)
+
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING
+    )
+    auto_closed = models.BooleanField(default=False)
+    completed_on = models.DateField(null=True, blank=True)
+    completed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    note = models.CharField(max_length=300, blank=True)
+    # Maintenance only: did the customer report a problem after the service?
+    has_issue = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["due_date", "id"]
+        indexes = [
+            models.Index(fields=["business", "status", "due_date"]),
+            models.Index(fields=["sale", "kind"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(kind="emi_due", installment__isnull=False)
+                | (~Q(kind="emi_due") & Q(installment__isnull=True)),
+                name="followup_installment_only_for_emi",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.due_date}"

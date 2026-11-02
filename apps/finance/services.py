@@ -1,6 +1,6 @@
 from django.utils import timezone
 
-from .models import Expense
+from .models import Expense, Income
 
 
 def record_salary_expense(payment):
@@ -55,6 +55,42 @@ def void_purchase_expense(payment, actor, reason):
         status=Expense.Status.ACTIVE,
     ).update(
         status=Expense.Status.VOID,
+        voided_by=actor,
+        voided_at=timezone.now(),
+        void_reason=reason,
+    )
+
+
+SALE_INCOME_CATEGORY = {
+    "stock": Income.Category.STOCK_SALE,
+    "bike": Income.Category.BIKE_SALE,
+    "maintenance": Income.Category.MAINTENANCE,
+}
+
+
+def record_sale_income(payment):
+    """The income that mirrors one customer payment."""
+    sale = payment.sale
+
+    return Income.objects.create(
+        business=sale.business,
+        category=SALE_INCOME_CATEGORY[sale.sale_type],
+        amount=payment.amount,
+        income_date=payment.paid_on,
+        description=f"Payment for {sale.sale_no}",
+        payment_method=payment.method,
+        reference=payment.reference,
+        sale_payment=payment,
+        created_by=payment.received_by,
+    )
+
+
+def void_sale_income(payment, actor, reason):
+    Income.objects.filter(
+        sale_payment=payment,
+        status=Income.Status.ACTIVE,
+    ).update(
+        status=Income.Status.VOID,
         voided_by=actor,
         voided_at=timezone.now(),
         void_reason=reason,

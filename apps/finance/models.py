@@ -111,3 +111,90 @@ class Expense(models.Model):
 
     def __str__(self):
         return f"{self.category} {self.amount} on {self.expense_date}"
+
+
+class Income(models.Model):
+    """
+    Money the business received. Every customer payment on a sale appears
+    here automatically (read-only, in the category of its sale); other income
+    is entered by the owner. Nothing is deleted: a wrong entry is voided, and
+    voiding a sale payment voids its income.
+    """
+
+    class Category(models.TextChoices):
+        STOCK_SALE = "stock_sale", "Stock sale"
+        BIKE_SALE = "bike_sale", "Bike sale"
+        MAINTENANCE = "maintenance", "Maintenance"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="incomes",
+    )
+    category = models.CharField(max_length=20, choices=Category.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    income_date = models.DateField()
+    description = models.CharField(max_length=200, blank=True)
+    payment_method = models.CharField(
+        max_length=10, choices=Expense.Method.choices, blank=True
+    )
+    reference = models.CharField(max_length=100, blank=True)
+
+    # Set only for income that mirrors a customer payment on a sale.
+    sale_payment = models.OneToOneField(
+        "sales.SalePayment",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="income",
+    )
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-income_date", "-id"]
+        indexes = [
+            models.Index(fields=["business", "status", "income_date"]),
+            models.Index(fields=["business", "category"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="income_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(sale_payment__isnull=True) | ~Q(category="other"),
+                name="income_sale_link_is_a_sale_category",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.category} {self.amount} on {self.income_date}"

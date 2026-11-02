@@ -10,8 +10,8 @@ from rest_framework.response import Response
 from apps.common.exceptions import Conflict
 from apps.common.permissions import IsOwner
 
-from .models import Expense
-from .serializers import ExpenseSerializer, VoidSerializer
+from .models import Expense, Income
+from .serializers import ExpenseSerializer, IncomeSerializer, VoidSerializer
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -138,3 +138,89 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             refunds = refunds.filter(settled_on__lte=day)
 
         return refunds.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+
+
+class IncomeViewSet(viewsets.ModelViewSet):
+    """
+    Income of the active business. Every customer payment on a sale is added
+    here automatically (read-only); other income is entered by the owner.
+    Income is voided, not deleted.
+    """
+
+    permission_classes = [IsOwner]
+    serializer_class = IncomeSerializer
+    # Manual income is entered once and voided if wrong, never edited.
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "category": ["exact"],
+        "status": ["exact"],
+        "payment_method": ["exact"],
+        "income_date": ["gte", "lte"],
+    }
+    search_fields = ("description", "reference")
+    ordering_fields = ("income_date", "amount", "created_at")
+
+    def get_queryset(self):
+        return Income.objects.filter(business=self.request.active_business)
+
+    def perform_create(self, serializer):
+        serializer.save(
+            business=self.request.active_business,
+            created_by=self.request.user,
+            income_date=serializer.validated_data.get(
+                "income_date", timezone.localdate()
+            ),
+        )
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        income = self.get_object()
+
+        if income.sale_payment_id:
+            raise Conflict(
+                "This income comes from a customer payment. Void the "
+                "payment to remove it.",
+                code="payment_income_locked",
+            )
+
+        if income.status != Income.Status.ACTIVE:
+            raise Conflict("This income is already void.", code="invalid_status")
+
+        serializer = VoidSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        income.status = Income.Status.VOID
+        income.voided_by = request.user
+        income.voided_at = timezone.now()
+        income.void_reason = serializer.validated_data["reason"]
+        income.save(update_fields=["status", "voided_by", "voided_at", "void_reason"])
+
+        return Response(self.get_serializer(income).data)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        """Totals by category for the filtered, active income."""
+        queryset = self.filter_queryset(self.get_queryset()).filter(
+            status=Income.Status.ACTIVE
+        )
+
+        rows = (
+            queryset.values("category")
+            .annotate(total=Sum("amount"), count=Count("id"))
+            .order_by("category")
+        )
+
+        total = sum((row["total"] for row in rows), Decimal("0"))
+
+        return Response({
+            "total": f"{total:.2f}",
+            "by_category": [
+                {
+                    "category": row["category"],
+                    "total": f"{row['total']:.2f}",
+                    "count": row["count"],
+                }
+                for row in rows
+            ],
+        })

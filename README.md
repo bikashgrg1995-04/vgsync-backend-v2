@@ -17,9 +17,9 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments, purchase returns and supplier credit (needs the `purchases` permission) | API |
-| Sales: customers, sales with server-calculated totals, confirming (stock out, invoice number), customer payments and credit to receive (needs the `sales` permission) | API |
+| Sales: stock, bike (full payment or EMI) and maintenance sales, customers, confirming (stock out, invoice number), customer payments, credit to receive, follow-ups and income (needs the `sales` permission) | API |
 | Company / business management APIs | Not yet implemented |
-| Sale returns, bike sales, orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
+| Sale returns, orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
 ## Tech stack
 
@@ -43,7 +43,7 @@ apps/
   payroll/           Pay setup, entries, payments and balances
   purchases/         Suppliers, purchases, receiving stock and supplier payments
   sales/             Customers, sales, confirming (stock out) and customer payments
-  finance/           Expenses (salary and supplier payments are added automatically)
+  finance/           Expenses and income (salary, supplier and customer payments are added automatically)
 ```
 
 ## Setup
@@ -491,6 +491,46 @@ Rules:
 - Only active products of the business's catalog can be sold; sale-only local products are not part of this yet.
 - Customers belong to one business; a phone number can be used once per business. Sales, customers and payments of one business are never visible to another.
 
+### Kinds of sale
+
+`sale_type` says what is sold (it is fixed once the draft is made):
+
+| Type | Lines | Notes |
+| --- | --- | --- |
+| `stock` (default) | `product` + `quantity` | Plain stock sale. Stock goes down on confirm. |
+| `maintenance` | `product` (a part, takes stock) and/or `description` + `unit_price` (a service charge, no stock) | Optional `vehicle_chassis_no`, `vehicle_reg_no`. At least one line. |
+| `bike` | exactly one `bike_unit` (a registered bike) | Full payment or EMI. The unit is marked sold on confirm; the same bike cannot be sold twice (`409`, `bike_unavailable`). |
+
+Bikes are registered one by one with `POST /sales/bikes/` (`product`, `chassis_no`, `engine_no`, `color`); filters `status` (`in_stock`, `sold`), `product`, `search`. A chassis number is one physical bike, so it is unique across the system. Registering a unit never changes stock (stock comes from purchases or transfers) and there can never be more units in stock than the stock balance of the model.
+
+### EMI (bike sales)
+
+Send `payment_mode: "emi"` with `down_payment`, `emi_months`, `emi_amount` (monthly) and optionally `first_emi_due` (default: one month after the sale date). The server works out the finance charge:
+
+```
+down_payment + emi_months x emi_amount - net_total  =  finance_charge   (cannot be negative)
+amount due = net_total + finance_charge
+```
+
+The down payment must be received before the sale can be confirmed (`409`, `down_payment_due`) and an EMI needs a customer. Confirming creates the monthly instalments; `GET /sales/{id}/` shows them as `installments`, each with `paid_amount` and a status (`paid`, `partial`, `upcoming`, `overdue`). Money received after the down payment covers the instalments in order, so the schedule is always worked out from the payments and never typed in. Payments cannot exceed the amount due, and the down payment of a confirmed EMI sale cannot be voided.
+
+### Follow-ups
+
+Follow-ups are created by the system when a sale is confirmed. They are listed at `GET /sales/followups/` (filters: `kind`, `status`, `customer`, `sale`, `due_date__gte`, `due_date__lte`, `overdue=true`, `search`) and every one shows the `sale_date`, the customer and the vehicle.
+
+| Kind | When | Closes |
+| --- | --- | --- |
+| `maintenance_post` | 3 days after the service date | When a person marks it done. Records `has_issue` and a note. |
+| `maintenance_due` | 90 days after the service date | When a person marks it done. Shows the 3-day check as `previous_followup` (status, `has_issue`, note). |
+| `emi_due` | One per EMI instalment, on its due date | By itself when the instalment is paid; opens again if that payment is voided. |
+| `credit_due` | A sale left partly unpaid (not EMI); `due_date` on the sale, default 30 days after the sale date | By itself when it is paid; opens again if that payment is voided. |
+
+`POST /sales/followups/{id}/done/` takes `note`, `has_issue` (maintenance only) and optionally `next_due_date` (maintenance only) to book the next follow-up. `POST /sales/followups/{id}/skip/` needs a `note`. A follow-up closed by a person is never reopened by the system.
+
+### Income
+
+Every customer payment is added to income automatically in the category of its sale (`stock_sale`, `bike_sale`, `maintenance`), on the day it is received; money not yet received stays as credit to receive and is not income. Voiding the payment voids its income. See `GET /finance/income/` below.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.
@@ -505,6 +545,16 @@ Every payroll payment is recorded as a `salary` expense, and every supplier paym
 Categories: `salary`, `purchase`, `rent`, `utilities`, `transport`, `marketing`, `maintenance`, `other`. Salary and purchase expenses come from payments and are read-only here (`409`, `payment_expense_locked`); void the payment instead. Expenses belong to the active business, so a company owner sees Head Office expenses and a branch owner sees the branch's.
 
 Supplier refunds are cash coming back, so the summary subtracts them: `net_total = total - purchase_refunds`. The original `purchase` expenses stay untouched, and a return or an adjustment never changes expenses.
+
+## Income API (owner only)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/finance/income/` | List (filters: `category`, `status`, `payment_method`, `income_date__gte`, `income_date__lte`) or add other income |
+| `POST` | `/finance/income/{id}/void/` | Void manual income, with a reason |
+| `GET` | `/finance/income/summary/` | Totals of active income by category, for the same filters |
+
+Categories: `stock_sale`, `bike_sale`, `maintenance`, `other`. The sale categories come from customer payments and are read-only (`409`, `payment_income_locked`); void the payment instead. Only `other` can be entered by hand. Income belongs to the active business.
 
 ## Lists
 

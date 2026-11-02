@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Customer, Sale, SaleItem, SalePayment
+from .models import BikeUnit, Customer, EmiInstallment, Followup, Sale, SaleItem, SalePayment
 
 
 @admin.register(Customer)
@@ -47,3 +47,16 @@ class SaleAdmin(ReadOnlyAdmin):
 class SalePaymentAdmin(ReadOnlyAdmin):
     list_display = ("sale", "amount", "method", "paid_on", "status")
     list_filter = ("status", "method")
+
+
+@admin.register(BikeUnit)
+class BikeUnitAdmin(ReadOnlyAdmin):
+    list_display = ("chassis_no", "engine_no", "product", "business", "status")
+    list_filter = ("status", "business")
+    search_fields = ("chassis_no", "engine_no")
+
+
+@admin.register(Followup)
+class FollowupAdmin(ReadOnlyAdmin):
+    list_display = ("kind", "sale", "due_date", "status")
+    list_filter = ("kind", "status")

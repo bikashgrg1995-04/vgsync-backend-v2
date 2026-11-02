@@ -18,9 +18,13 @@ from rest_framework.response import Response
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 from apps.purchases.views import MONEY_FIELD, sum_of
 
-from .models import Customer, Sale, SaleItem, SalePayment
+from .models import BikeUnit, Customer, Followup, Sale, SaleItem, SalePayment
 from .serializers import (
+    BikeUnitSerializer,
     CustomerSerializer,
+    FollowupDoneSerializer,
+    FollowupSerializer,
+    FollowupSkipSerializer,
     ReasonSerializer,
     SaleDetailSerializer,
     SalePatchSerializer,
@@ -30,9 +34,12 @@ from .serializers import (
 )
 from .services import (
     cancel_sale,
+    complete_followup,
     confirm_sale,
     create_payment,
     create_sale,
+    register_bike_unit,
+    skip_followup,
     update_sale,
     void_payment,
 )
@@ -67,7 +74,10 @@ class CustomerViewSet(SalesBaseViewSet):
     Customers of the active business, with what they owe.
     ``DELETE`` deactivates; a customer with sales is never removed.
 
-    ``credit_to_receive`` is what the customer still owes on confirmed sales.
+    ``total_sales`` and ``credit_to_receive`` count what the customer has to
+    pay in all on confirmed sales, including any EMI finance charge; so
+    ``credit_to_receive`` is everything still owed, instalments not yet due
+    included.
     ``advance_received`` is money taken on drafts that are not yet confirmed.
     """
 
@@ -86,9 +96,14 @@ class CustomerViewSet(SalesBaseViewSet):
         return Customer.objects.filter(
             business=self.request.active_business
         ).annotate(
-            total_sales=sum_of(
+            _net=sum_of(
                 Sale.objects.filter(customer=OuterRef("pk"), status=confirmed),
                 "customer",
+            ),
+            _finance=sum_of(
+                Sale.objects.filter(customer=OuterRef("pk"), status=confirmed),
+                "customer",
+                "finance_charge",
             ),
             _received=sum_of(
                 SalePayment.objects.filter(
@@ -108,6 +123,10 @@ class CustomerViewSet(SalesBaseViewSet):
                 "sale__customer",
                 "amount",
             ),
+        ).annotate(
+            total_sales=ExpressionWrapper(
+                F("_net") + F("_finance"), output_field=MONEY_FIELD
+            )
         ).annotate(
             credit_to_receive=ExpressionWrapper(
                 F("total_sales") - F("_received"), output_field=MONEY_FIELD
@@ -147,18 +166,28 @@ class SaleViewSet(SalesBaseViewSet):
     A sale is a draft until it is confirmed: ``confirm`` then takes the lines
     out of stock, gives the invoice number and locks it. Only drafts can be
     edited or cancelled. Filters: ``status``, ``customer``,
-    ``payment_status`` (``unpaid``, ``partial``, ``paid``),
-    ``sale_date__gte`` / ``__lte``.
+    ``sale_type`` (``stock``, ``bike``, ``maintenance``), ``payment_mode``
+    (``full``, ``emi``), ``payment_status`` (``unpaid``, ``partial``,
+    ``paid``), ``sale_date__gte`` / ``__lte``.
     """
 
     http_method_names = ["get", "post", "patch", "head", "options"]
 
     filterset_fields = {
         "status": ["exact"],
+        "sale_type": ["exact"],
+        "payment_mode": ["exact"],
         "customer": ["exact"],
         "sale_date": ["gte", "lte"],
     }
-    search_fields = ("customer__name", "walk_in_name", "customer__phone")
+    search_fields = (
+        "customer__name",
+        "walk_in_name",
+        "customer__phone",
+        "vehicle_chassis_no",
+        "vehicle_reg_no",
+        "items__bike_unit__chassis_no",
+    )
     ordering_fields = ("sale_date", "number", "net_total", "created_at")
     ordering = ("-sale_date", "-number")
 
@@ -185,6 +214,11 @@ class SaleViewSet(SalesBaseViewSet):
                 "payments",
             )
             .annotate(paid=paid)
+            .annotate(
+                due=ExpressionWrapper(
+                    F("net_total") + F("finance_charge"), output_field=MONEY_FIELD
+                )
+            )
         )
 
         wanted = self.request.query_params.get("payment_status")
@@ -192,9 +226,9 @@ class SaleViewSet(SalesBaseViewSet):
         if wanted == "unpaid":
             queryset = queryset.filter(paid=0)
         elif wanted == "partial":
-            queryset = queryset.filter(paid__gt=0, paid__lt=F("net_total"))
+            queryset = queryset.filter(paid__gt=0, paid__lt=F("due"))
         elif wanted == "paid":
-            queryset = queryset.filter(paid__gte=F("net_total"))
+            queryset = queryset.filter(paid__gte=F("due"))
 
         return queryset
 
@@ -315,3 +349,122 @@ class SalePaymentViewSet(SalesBaseViewSet):
         )
 
         return Response(self.get_serializer(payment).data)
+
+
+# ---------------------------------------------------------------------------
+# Bike units
+# ---------------------------------------------------------------------------
+
+class BikeUnitViewSet(SalesBaseViewSet):
+    """
+    The bikes of the active business, one record per chassis number. A unit
+    is in stock until a bike sale is confirmed. Units are never deleted.
+    """
+
+    serializer_class = BikeUnitSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    filterset_fields = ("status", "product")
+    search_fields = ("chassis_no", "engine_no", "color", "product__name")
+    ordering_fields = ("created_at", "chassis_no")
+    ordering = ("-id",)
+
+    def get_queryset(self):
+        return BikeUnit.objects.filter(
+            business=self.request.active_business
+        ).select_related("product")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+
+        unit = register_bike_unit(
+            business=request.active_business, product=data.pop("product"), **data
+        )
+
+        return Response(
+            self.get_serializer(unit).data, status=status.HTTP_201_CREATED
+        )
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups
+# ---------------------------------------------------------------------------
+
+class FollowupViewSet(SalesBaseViewSet):
+    """
+    Calls and visits to make: maintenance 3 and 90 days after a service
+    (counted from the sale date), EMI instalments, and credit still to receive. They are created by the system
+    when a sale is confirmed and close by themselves once the money is
+    received. Filters: ``kind``, ``status``, ``customer``, ``sale``,
+    ``due_date__gte`` / ``__lte``, and ``overdue=true`` (pending and past
+    the due date).
+    """
+
+    serializer_class = FollowupSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "kind": ["exact"],
+        "status": ["exact"],
+        "customer": ["exact"],
+        "sale": ["exact"],
+        "due_date": ["gte", "lte"],
+    }
+    search_fields = (
+        "customer__name",
+        "customer__phone",
+        "sale__walk_in_name",
+        "sale__vehicle_chassis_no",
+        "sale__vehicle_reg_no",
+    )
+    ordering_fields = ("due_date", "created_at")
+    ordering = ("due_date", "id")
+
+    def get_queryset(self):
+        queryset = Followup.objects.filter(
+            business=self.request.active_business
+        ).select_related("sale", "customer", "installment")
+
+        if self.request.query_params.get("overdue") in ("true", "1"):
+            queryset = queryset.filter(
+                status=Followup.Status.PENDING,
+                due_date__lt=timezone.localdate(),
+            )
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        # Follow-ups come from sales, not from the client.
+        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    @action(detail=True, methods=["post"])
+    def done(self, request, pk=None):
+        """Mark it done, with a note. Maintenance can record an issue and book the next one."""
+        serializer = FollowupDoneSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        followup = complete_followup(
+            followup=self.get_object(),
+            user=request.user,
+            note=serializer.validated_data["note"],
+            next_due_date=serializer.validated_data.get("next_due_date"),
+            has_issue=serializer.validated_data["has_issue"],
+        )
+
+        return Response(self.get_serializer(followup).data)
+
+    @action(detail=True, methods=["post"])
+    def skip(self, request, pk=None):
+        """Give up on it, with a note saying why."""
+        serializer = FollowupSkipSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        followup = skip_followup(
+            followup=self.get_object(),
+            user=request.user,
+            note=serializer.validated_data["note"],
+        )
+
+        return Response(self.get_serializer(followup).data)

@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from apps.common.exceptions import Conflict
 
-from .models import Expense
+from .models import Expense, Income
 
 MANUAL_CATEGORIES = [
     (value, label)
@@ -92,3 +92,50 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
 class VoidSerializer(serializers.Serializer):
     reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+
+
+class IncomeSerializer(serializers.ModelSerializer):
+    category = serializers.ChoiceField(choices=Income.Category.choices)
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.01")
+    )
+    income_date = serializers.DateField(required=False)
+    payment_method = serializers.ChoiceField(
+        choices=Expense.Method.choices, required=False, allow_blank=True
+    )
+    sale_payment = serializers.IntegerField(
+        source="sale_payment_id", read_only=True
+    )
+
+    class Meta:
+        model = Income
+        fields = (
+            "id",
+            "category",
+            "amount",
+            "income_date",
+            "description",
+            "payment_method",
+            "reference",
+            "sale_payment",
+            "status",
+            "voided_at",
+            "void_reason",
+            "created_at",
+        )
+        read_only_fields = ("id", "status", "voided_at", "void_reason", "created_at")
+
+    def validate_category(self, value):
+        if value != Income.Category.OTHER:
+            raise serializers.ValidationError(
+                "Sale income is created by recording a customer payment. "
+                "Only 'other' income is entered here."
+            )
+
+        return value
+
+    def validate_income_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
