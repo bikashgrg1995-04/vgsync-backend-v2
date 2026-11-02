@@ -17,8 +17,9 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments, purchase returns and supplier credit (needs the `purchases` permission) | API |
+| Sales: customers, sales with server-calculated totals, confirming (stock out, invoice number), customer payments and credit to receive (needs the `sales` permission) | API |
 | Company / business management APIs | Not yet implemented |
-| Purchases, sales, bike sales, orders, finance, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
+| Sale returns, bike sales, orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
 ## Tech stack
 
@@ -41,6 +42,7 @@ apps/
   inventory/         Inventory foundation (products, stock, transfers)
   payroll/           Pay setup, entries, payments and balances
   purchases/         Suppliers, purchases, receiving stock and supplier payments
+  sales/             Customers, sales, confirming (stock out) and customer payments
   finance/           Expenses (salary and supplier payments are added automatically)
 ```
 
@@ -443,6 +445,51 @@ Rules:
 - A supplier shows `credit_to_receive` and `stock_to_receive` separately from `credit_to_pay`. Credit cannot go below zero, and an adjustment cannot exceed what the purchase still owes.
 - A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund or adjustment first.
 - Returns, refunds, replacements and adjustments are never edited or deleted.
+
+## Sales API
+
+Selling stock to customers, for the active business. It needs the `sales` module permission (owner, admin and accountant have it by role; staff need it on their Position). Writes need full access to the business, so a company owner is read-only inside a branch. Money is sent and returned as strings.
+
+```
+draft  --confirm-->  confirmed          (stock goes down, once; invoice number given; the sale is locked)
+draft  --cancel-->   cancelled
+```
+
+A draft can be edited freely and has no effect on stock. `confirm` takes every line out of the business's stock through the inventory stock service (one `sale_issue` movement per line, referencing `INV-000001`), all or nothing, and only once; if one line has too little stock nothing is taken. A confirmed sale cannot be edited or cancelled; sale returns will handle corrections.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/sales/` | List (filters: `status`, `customer`, `payment_status`, `sale_date__gte`, `sale_date__lte`, `search`) or create a draft |
+| `GET`, `PATCH` | `/sales/{id}/` | View, or edit a draft. Sending `items` replaces all lines |
+| `POST` | `/sales/{id}/confirm/` | Hand over the goods: take the lines out of stock |
+| `POST` | `/sales/{id}/cancel/` | Cancel a draft, with a `reason` |
+| `GET`, `POST` | `/sales/payments/` | List or record a customer payment (full or part, also on a draft as an advance) |
+| `POST` | `/sales/payments/{id}/void/` | Void a payment, with a `reason` |
+| `GET`, `POST` | `/sales/customers/` | List or add customers |
+| `GET`, `PATCH`, `DELETE` | `/sales/customers/{id}/` | View, edit or deactivate a customer |
+
+Create a sale:
+
+```json
+{
+  "customer": 3,
+  "items": [{"product": 7, "quantity": "2"}, {"product": 9, "quantity": "1", "unit_price": "950.00"}],
+  "discount_amount": "100.00",
+  "vat_rate": "13"
+}
+```
+
+Totals are never accepted from the client. Order: line totals, minus the discount, VAT on what is left (same as purchases; `vat_rate` defaults to 0). A line without `unit_price` takes the product's `sale_price`; a product with no sale price needs a price on the line. Changing a line price never changes the product.
+
+Each sale returns `paid_amount`, `remaining_amount` and `payment_status` (`unpaid`, `partial`, `paid`), derived from its payments. A customer shows `total_sales`, `credit_to_receive` (confirmed sales not yet paid) and `advance_received` (paid on drafts).
+
+Rules:
+
+- A sale without a `customer` is a walk-in (optional `walk_in_name` for the invoice). A walk-in sale must be paid in full before it can be confirmed; selling on credit needs a customer.
+- Invoice numbers (`INV-000001`) are given at confirmation, in order and without gaps, so cancelled drafts never use one. Draft numbers (`SAL-000001`) run on within a business.
+- Payments are never edited or deleted; void one with a reason. A payment cannot make the total received exceed the net total, and voiding a payment cannot leave a walk-in sale unpaid. A draft with payments cannot be cancelled or cut below what was received.
+- Only active products of the business's catalog can be sold; sale-only local products are not part of this yet.
+- Customers belong to one business; a phone number can be used once per business. Sales, customers and payments of one business are never visible to another.
 
 ## Expenses API (owner only)
 
