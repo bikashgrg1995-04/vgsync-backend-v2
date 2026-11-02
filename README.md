@@ -406,12 +406,17 @@ Rules:
 
 ### Purchase returns and supplier credit
 
-Sending goods back to a supplier does not always bring money back: the supplier may refund it, or send other goods instead. So a return only creates **credit**, kept apart from what you owe.
+Two ledgers per supplier, kept apart:
+
+- **Credit to pay** (`credit_to_pay`): what you owe. It starts the moment a purchase is ordered (even before the goods arrive, `to_pay_on_order`), stays after receiving (`outstanding`), and goes down only when you record a payment (or apply credit). Paying before the goods arrive shows as `advance_paid`.
+- **Credit to receive** (`credit_to_receive`): what the supplier owes you after a return. Sending goods back does not always bring money back, so a return only creates credit; the decision (refund or replacement) comes after.
 
 ```
-return  -->  stock goes down, credit goes up           (no money moves, no expense changes)
-credit  -->  refund      supplier pays cash back       (reduces net spending)
-        -->  adjustment  set against a later purchase  (replacement goods; no cash moves)
+return  -->  stock goes down, credit to receive goes up      (no money moves, no expense changes)
+credit  -->  refund       supplier pays cash back            (credit down; reduces net spending)
+        -->  replacement  supplier will send goods instead   (credit down; goods become stock_to_receive;
+                                                              stock goes up only when they arrive)
+        -->  adjustment   set against a later purchase       (credit down; that purchase owes less)
 ```
 
 | Method | Path | Description |
@@ -420,22 +425,24 @@ credit  -->  refund      supplier pays cash back       (reduces net spending)
 | `GET` | `/purchases/returns/{id}/` | View a return (`PRT-000001`) |
 | `POST` | `/purchases/returns/{id}/void/` | Undo a return, with a `reason`: goods go back into stock and the credit is removed |
 | `GET`, `POST` | `/purchases/credits/` | List (filters: `supplier`, `kind`, `status`) or use credit |
-| `POST` | `/purchases/credits/{id}/void/` | Undo a refund or adjustment, with a `reason` |
+| `POST` | `/purchases/credits/{id}/receive/` | The replacement goods arrived: add them to stock (once; optional `received_on`) |
+| `POST` | `/purchases/credits/{id}/void/` | Undo a refund, adjustment or a replacement still waiting, with a `reason` |
 
 Return: `{"purchase": 5, "reason": "Wrong specification", "items": [{"purchase_item": 11, "quantity": "4", "stock_condition": "good"}]}`. `stock_condition` is `good` (default) or `damaged`, the stock the goods are taken from.
 
 Use credit with `POST /purchases/credits/`:
 
 - Refund: `{"supplier": 2, "kind": "refund", "amount": "400.00", "method": "bank"}`.
-- Replacement goods: enter the replacement as a normal purchase, then `{"supplier": 2, "kind": "adjustment", "amount": "400.00", "purchase": 9}`. The purchase's `remaining_amount` drops and `credit_applied` shows it.
+- Replacement goods: `{"supplier": 2, "kind": "replacement", "amount": "400.00", "items": [{"product": 3, "quantity": "4"}]}`. `amount` is the credit used up; the goods may differ from what was returned. They show as `stock_to_receive` and `delivery_status: "pending"` until `receive` adds them to stock (one `purchase_receipt` movement per product). A received replacement cannot be voided.
+- Replacement as a normal purchase: enter it as a purchase, then `{"supplier": 2, "kind": "adjustment", "amount": "400.00", "purchase": 9}`. The purchase's `remaining_amount` drops and `credit_applied` shows it.
 
 Rules:
 
 - A line must belong to the chosen purchase, cannot be listed twice, and cannot be returned beyond what is left (`returnable_quantity` on each line). Goods already sold cannot be returned: the stock must still be there, otherwise nothing is returned.
 - Credit for a line is its value minus its share of the discount, plus VAT. Freight is never credited, and credits for a purchase never add up to more than its goods.
-- A supplier shows `credit_balance` separately from `outstanding`. Credit cannot go below zero, and an adjustment cannot exceed what the purchase still owes.
+- A supplier shows `credit_to_receive` and `stock_to_receive` separately from `credit_to_pay`. Credit cannot go below zero, and an adjustment cannot exceed what the purchase still owes.
 - A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund or adjustment first.
-- Returns, refunds and adjustments are never edited or deleted.
+- Returns, refunds, replacements and adjustments are never edited or deleted.
 
 ## Expenses API (owner only)
 

@@ -30,6 +30,7 @@ from apps.common.permissions import HasActiveBusinessContext, HasModulePermissio
 
 from .models import (
     CreditSettlement,
+    CreditSettlementItem,
     Purchase,
     PurchaseItem,
     PurchasePayment,
@@ -39,6 +40,7 @@ from .models import (
 from .returns import (
     create_return,
     create_settlement,
+    receive_replacement,
     void_return,
     void_settlement,
 )
@@ -52,6 +54,7 @@ from .serializers import (
     PurchaseSerializer,
     PurchaseWriteSerializer,
     ReasonSerializer,
+    ReceiveReplacementSerializer,
     SupplierSerializer,
 )
 from .services import (
@@ -109,11 +112,16 @@ class SupplierViewSet(PurchaseBaseViewSet):
     Suppliers of the active business, with what is owed to each one.
     ``DELETE`` deactivates; a supplier with purchases is never removed.
 
-    ``outstanding`` counts received purchases not yet paid for (after
-    payments and applied credit); ``advance_paid`` is money already paid on
-    purchases not yet received; ``credit_balance`` is the credit from
-    returned goods that has not been refunded or applied yet. It is kept
-    apart from ``outstanding``.
+    Money to pay: ``credit_to_pay`` is everything owed on purchases that are
+    ordered or received, after payments and applied credit. It is
+    ``outstanding`` (received, not yet paid) plus ``to_pay_on_order`` (still
+    waiting for the goods). ``advance_paid`` is what was already paid on
+    purchases not yet received.
+
+    Money to receive: ``credit_to_receive`` is the credit from returned
+    goods that has not yet been refunded, applied or turned into replacement
+    goods. It is kept apart from what is owed. ``stock_to_receive`` is the
+    quantity of replacement goods the supplier still has to send.
     """
 
     serializer_class = SupplierSerializer
@@ -174,6 +182,38 @@ class SupplierViewSet(PurchaseBaseViewSet):
                 "supplier",
                 "credit_amount",
             ),
+            _order_total=sum_of(
+                Purchase.objects.filter(
+                    supplier=OuterRef("pk"), status=Purchase.Status.DRAFT
+                ),
+                "supplier",
+            ),
+            _order_applied=sum_of(
+                CreditSettlement.objects.filter(
+                    supplier=OuterRef("pk"),
+                    kind=CreditSettlement.Kind.ADJUSTMENT,
+                    purchase__status=Purchase.Status.DRAFT,
+                    status=active_credit,
+                ),
+                "supplier",
+                "amount",
+            ),
+            stock_to_receive=Coalesce(
+                Subquery(
+                    CreditSettlementItem.objects.filter(
+                        settlement__supplier=OuterRef("pk"),
+                        settlement__kind=CreditSettlement.Kind.REPLACEMENT,
+                        settlement__status=active_credit,
+                        settlement__received_on__isnull=True,
+                    )
+                    .values("settlement__supplier")
+                    .annotate(total=Sum("quantity"))
+                    .values("total")[:1],
+                    output_field=DecimalField(max_digits=14, decimal_places=3),
+                ),
+                Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=3),
+            ),
             _credit_used=sum_of(
                 CreditSettlement.objects.filter(
                     supplier=OuterRef("pk"), status=active_credit
@@ -186,8 +226,17 @@ class SupplierViewSet(PurchaseBaseViewSet):
                 F("total_purchased") - F("_paid") - F("_applied"),
                 output_field=MONEY_FIELD,
             ),
-            credit_balance=ExpressionWrapper(
+            credit_to_receive=ExpressionWrapper(
                 F("_credit_earned") - F("_credit_used"),
+                output_field=MONEY_FIELD,
+            ),
+            to_pay_on_order=ExpressionWrapper(
+                F("_order_total") - F("advance_paid") - F("_order_applied"),
+                output_field=MONEY_FIELD,
+            ),
+        ).annotate(
+            credit_to_pay=ExpressionWrapper(
+                F("outstanding") + F("to_pay_on_order"),
                 output_field=MONEY_FIELD,
             ),
         )
@@ -433,7 +482,7 @@ class PurchaseReturnViewSet(PurchaseBaseViewSet):
     """
     Goods sent back to the supplier from a received purchase. A return takes
     the goods out of stock and creates a credit with the supplier (shown
-    separately as ``credit_balance`` on the supplier). A return cannot be
+    separately as ``credit_to_receive`` on the supplier). A return cannot be
     edited or deleted; void it with a reason.
     """
 
@@ -501,8 +550,9 @@ class PurchaseReturnViewSet(PurchaseBaseViewSet):
 class CreditSettlementViewSet(PurchaseBaseViewSet):
     """
     Using a supplier's credit: ``refund`` (the supplier paid money back) or
-    ``adjustment`` (applied to a purchase so it owes less; this is also how
-    replacement goods are paid for). Cannot be edited; void with a reason.
+    ``adjustment`` (applied to a purchase so it owes less) or
+    ``replacement`` (goods instead of money: stock to receive until they
+    arrive; use ``receive``). Cannot be edited; void with a reason.
     """
 
     serializer_class = CreditSettlementSerializer
@@ -514,6 +564,7 @@ class CreditSettlementViewSet(PurchaseBaseViewSet):
         "kind": ["exact"],
         "purchase": ["exact"],
         "settled_on": ["gte", "lte"],
+        "received_on": ["isnull"],
     }
     search_fields = ("reference", "supplier__name")
     ordering_fields = ("settled_on", "amount", "created_at")
@@ -522,7 +573,9 @@ class CreditSettlementViewSet(PurchaseBaseViewSet):
     def get_queryset(self):
         return CreditSettlement.objects.filter(
             supplier__business=self.request.active_business
-        ).select_related("supplier", "purchase")
+        ).select_related("supplier", "purchase").prefetch_related(
+            "items__product"
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -539,11 +592,28 @@ class CreditSettlementViewSet(PurchaseBaseViewSet):
             method=data.get("method", ""),
             reference=data.get("reference", ""),
             notes=data.get("notes", ""),
+            items=data.get("items", ()),
         )
 
         return Response(
             self.get_serializer(settlement).data, status=status.HTTP_201_CREATED
         )
+
+    @action(detail=True, methods=["post"])
+    def receive(self, request, pk=None):
+        """The replacement goods arrived: add them to stock (once)."""
+        serializer = ReceiveReplacementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        settlement = receive_replacement(
+            settlement=self.get_object(),
+            user=request.user,
+            received_on=serializer.validated_data.get(
+                "received_on", timezone.localdate()
+            ),
+        )
+
+        return Response(self.get_serializer(settlement).data)
 
     @action(detail=True, methods=["post"])
     def void(self, request, pk=None):

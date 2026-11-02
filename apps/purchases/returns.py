@@ -9,8 +9,10 @@ Rules
   line) and creates a **credit** with the supplier: the value of the goods
   with their share of the discount and VAT. Freight is not credited.
 * Credit is separate from what the business owes. It is used up by a
-  ``refund`` (the supplier pays money back) or an ``adjustment`` (applied to
-  a purchase, so that purchase owes less). Credit cannot go below zero.
+  ``refund`` (the supplier pays money back), an ``adjustment`` (applied to
+  a purchase, so that purchase owes less) or a ``replacement`` (the supplier
+  sends goods instead: the credit is used up and the goods are *stock to
+  receive* until they arrive). Credit cannot go below zero.
 * Returns and settlements are never edited or deleted; they are voided.
 """
 
@@ -27,6 +29,7 @@ from apps.inventory.services.stock import create_stock_movement
 
 from .models import (
     CreditSettlement,
+    CreditSettlementItem,
     Purchase,
     PurchaseItem,
     PurchaseReturn,
@@ -252,7 +255,8 @@ def void_return(*, purchase_return, user, reason):
 
 @transaction.atomic
 def create_settlement(*, supplier, user, kind, amount, settled_on,
-                      purchase=None, method="", reference="", notes=""):
+                      purchase=None, method="", reference="", notes="",
+                      items=()):
     supplier = Supplier.objects.select_for_update().get(pk=supplier.pk)
     amount = money(amount)
 
@@ -286,7 +290,26 @@ def create_settlement(*, supplier, user, kind, amount, settled_on,
     else:
         purchase = None
 
-    return CreditSettlement.objects.create(
+    if kind == CreditSettlement.Kind.REPLACEMENT:
+        products = [entry["product"].pk for entry in items]
+
+        if not items:
+            raise serializers.ValidationError(
+                {"items": "List the goods the supplier will send."}
+            )
+
+        if len(set(products)) != len(products):
+            raise serializers.ValidationError(
+                {"items": "A product is listed twice. Combine the quantities."}
+            )
+
+        method = ""
+    elif items:
+        raise serializers.ValidationError(
+            {"items": "Goods are listed for a replacement only."}
+        )
+
+    settlement = CreditSettlement.objects.create(
         supplier=supplier,
         kind=kind,
         amount=amount,
@@ -298,6 +321,59 @@ def create_settlement(*, supplier, user, kind, amount, settled_on,
         created_by=user,
     )
 
+    CreditSettlementItem.objects.bulk_create(
+        CreditSettlementItem(
+            settlement=settlement,
+            product=entry["product"],
+            quantity=entry["quantity"],
+        )
+        for entry in items
+    )
+
+    return settlement
+
+
+@transaction.atomic
+def receive_replacement(*, settlement, user, received_on):
+    """
+    The replacement goods arrived: add them to stock, once. Stock moves
+    exactly once; if any line cannot be received nothing is changed.
+    """
+    settlement = CreditSettlement.objects.select_for_update().select_related(
+        "supplier__business"
+    ).get(pk=settlement.pk)
+
+    if (
+        settlement.kind != CreditSettlement.Kind.REPLACEMENT
+        or settlement.status != CreditSettlement.Status.ACTIVE
+    ):
+        raise Conflict(
+            "Only a replacement that is still active can be received.",
+            code="invalid_status",
+        )
+
+    if settlement.received_on:
+        raise Conflict("These goods were already received.", code="already_received")
+
+    reference = f"RPL-{settlement.pk:06d}"
+
+    for item in settlement.items.select_related("product"):
+        create_stock_movement(
+            user=user,
+            business=settlement.supplier.business,
+            product=item.product,
+            movement_type=StockMovement.MovementType.PURCHASE_RECEIPT,
+            quantity=item.quantity,
+            reference=reference,
+            notes=f"Replacement from {settlement.supplier.name}",
+        )
+
+    settlement.received_on = received_on
+    settlement.received_by = user
+    settlement.save(update_fields=["received_on", "received_by"])
+
+    return settlement
+
 
 @transaction.atomic
 def void_settlement(*, settlement, user, reason):
@@ -307,6 +383,13 @@ def void_settlement(*, settlement, user, reason):
 
     if settlement.status != CreditSettlement.Status.ACTIVE:
         raise Conflict("This is already void.", code="invalid_status")
+
+    if settlement.received_on:
+        raise Conflict(
+            "The replacement goods are already in stock, so this cannot be "
+            "voided.",
+            code="already_received",
+        )
 
     settlement.status = CreditSettlement.Status.VOID
     settlement.voided_by = user

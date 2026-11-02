@@ -61,7 +61,7 @@ class ReturnTestCase(PurchaseTestCase):
     def credit(self, supplier=None):
         data = self.client.get(f"{SUPPLIERS}{(supplier or self.supplier).pk}/").json()
 
-        return data["credit_balance"]
+        return data["credit_to_receive"]
 
     def refund(self, amount, **extra):
         return self.client.post(
@@ -307,8 +307,8 @@ class CreditKeptApartTests(ReturnTestCase):
         self.returned(purchase, "4")
         after = self.client.get(f"{SUPPLIERS}{self.supplier.pk}/").json()
 
-        self.assertEqual(before["credit_balance"], "0.00")
-        self.assertEqual(after["credit_balance"], "400.00")
+        self.assertEqual(before["credit_to_receive"], "0.00")
+        self.assertEqual(after["credit_to_receive"], "400.00")
         self.assertEqual(after["outstanding"], before["outstanding"])
         self.assertEqual(after["total_purchased"], "1000.00")
 
@@ -533,7 +533,7 @@ class CreditKeptApartTests(ReturnTestCase):
         supplier = self.client.get(f"{SUPPLIERS}{self.supplier.pk}/").json()
 
         self.assertEqual(supplier["outstanding"], "700.00")
-        self.assertEqual(supplier["credit_balance"], "100.00")
+        self.assertEqual(supplier["credit_to_receive"], "100.00")
 
 
 class VoidReturnTests(ReturnTestCase):
@@ -689,3 +689,202 @@ class ReturnModelTests(ReturnTestCase):
                 business=self.ho, number=saved.number, purchase_id=purchase["id"],
                 supplier=self.supplier, return_date=timezone.localdate(), reason="x",
             )
+
+
+class CreditToPayTests(ReturnTestCase):
+
+    def figures(self):
+        return self.client.get(f"{SUPPLIERS}{self.supplier.pk}/").json()
+
+    def test_an_order_is_credit_to_pay_before_and_after_the_goods_arrive(self):
+        purchase = self.made()
+
+        ordered = self.figures()
+        self.assertEqual(ordered["credit_to_pay"], "1000.00")
+        self.assertEqual(ordered["to_pay_on_order"], "1000.00")
+        self.assertEqual(ordered["outstanding"], "0.00")
+
+        self.pay(purchase["id"], "400.00")
+        advance = self.figures()
+        self.assertEqual(advance["credit_to_pay"], "600.00")
+        self.assertEqual(advance["advance_paid"], "400.00")
+
+        self.receive(purchase["id"])
+        received = self.figures()
+        self.assertEqual(received["to_pay_on_order"], "0.00")
+        self.assertEqual(received["outstanding"], "600.00")
+        self.assertEqual(received["credit_to_pay"], "600.00")
+
+        self.pay(purchase["id"], "600.00")
+        self.assertEqual(self.figures()["credit_to_pay"], "0.00")
+
+    def test_cancelled_orders_are_not_owed(self):
+        purchase = self.made()
+        self.client.post(f"{BASE}{purchase['id']}/cancel/", {"reason": "x"}, format="json")
+
+        self.assertEqual(self.figures()["credit_to_pay"], "0.00")
+
+    def test_a_return_does_not_change_credit_to_pay(self):
+        purchase = self.received()
+        self.returned(purchase, "4")
+
+        figures = self.figures()
+
+        self.assertEqual(figures["credit_to_pay"], "1000.00")
+        self.assertEqual(figures["credit_to_receive"], "400.00")
+
+
+class ReplacementTests(ReturnTestCase):
+
+    def replace(self, amount="400.00", items=None, **extra):
+        payload = {
+            "supplier": self.supplier.pk,
+            "kind": "replacement",
+            "amount": amount,
+            "items": items if items is not None else [
+                {"product": self.oil.pk, "quantity": "4"}
+            ],
+            **extra,
+        }
+
+        return self.client.post(CREDITS, payload, format="json")
+
+    def figures(self):
+        return self.client.get(f"{SUPPLIERS}{self.supplier.pk}/").json()
+
+    def setUp(self):
+        super().setUp()
+        self.purchase = self.received()
+        self.returned(self.purchase, "4")
+
+    def test_replacement_uses_credit_and_becomes_stock_to_receive(self):
+        response = self.replace()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        data = response.json()
+        self.assertEqual(data["kind"], "replacement")
+        self.assertEqual(data["delivery_status"], "pending")
+        self.assertEqual(data["items"][0]["quantity"], "4.000")
+        self.assertIsNone(data["received_on"])
+
+        figures = self.figures()
+        self.assertEqual(figures["credit_to_receive"], "0.00")
+        self.assertEqual(figures["stock_to_receive"], "4.000")
+        # Nothing has arrived and no cash moved.
+        self.assertEqual(self.stock(), dec("6"))
+        summary = self.client.get(f"{EXPENSES}summary/").json()
+        self.assertEqual(summary["purchase_refunds"], "0.00")
+        self.assertEqual(figures["credit_to_pay"], "1000.00")
+
+    def test_receiving_the_goods_adds_them_to_stock_once(self):
+        settlement = self.replace().json()
+
+        response = self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.json()["delivery_status"], "received")
+        self.assertEqual(self.stock(), dec("10"))
+        self.assertEqual(self.figures()["stock_to_receive"], "0.000")
+        movement = StockMovement.objects.filter(reference__startswith="RPL-").get()
+        self.assertEqual(movement.movement_type, "purchase_receipt")
+        self.assertEqual(movement.quantity, dec("4"))
+
+        again = self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(again.data["code"], "already_received")
+        self.assertEqual(self.stock(), dec("10"))
+
+    def test_different_goods_can_be_sent_instead(self):
+        settlement = self.replace(
+            items=[{"product": self.filter.pk, "quantity": "2"}]
+        ).json()
+
+        self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+
+        self.assertEqual(self.stock(self.filter), dec("2"))
+        self.assertEqual(self.stock(), dec("6"))
+
+    def test_a_pending_replacement_can_be_voided_to_get_the_credit_back(self):
+        settlement = self.replace().json()
+
+        response = self.client.post(
+            f"{CREDITS}{settlement['id']}/void/", {"reason": "Supplier cancelled"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        figures = self.figures()
+        self.assertEqual(figures["credit_to_receive"], "400.00")
+        self.assertEqual(figures["stock_to_receive"], "0.000")
+
+        late = self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+        self.assertEqual(late.status_code, 409)
+        self.assertEqual(self.stock(), dec("6"))
+
+    def test_a_received_replacement_cannot_be_voided(self):
+        settlement = self.replace().json()
+        self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+
+        response = self.client.post(
+            f"{CREDITS}{settlement['id']}/void/", {"reason": "x"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "already_received")
+        self.assertEqual(self.credit(), "0.00")
+
+    def test_replacement_rules(self):
+        product = self.oil.pk
+
+        self.assertEqual(self.replace(amount="400.01").status_code, 400)
+        self.assertEqual(self.replace(items=[]).status_code, 400)
+        self.assertEqual(
+            self.replace(items=[{"product": product, "quantity": "0"}]).status_code, 400
+        )
+        self.assertEqual(
+            self.replace(items=[
+                {"product": product, "quantity": "1"},
+                {"product": product, "quantity": "1"},
+            ]).status_code,
+            400,
+        )
+        self.assertEqual(self.replace(method="cash").status_code, 400)
+        self.assertEqual(self.replace(purchase=self.purchase["id"]).status_code, 400)
+        self.assertEqual(self.refund("10", items=[{"product": product, "quantity": "1"}]).status_code, 400)
+        self.assertEqual(self.credit(), "400.00")
+
+    def test_only_a_replacement_can_be_received(self):
+        refund = self.refund("100.00").json()
+
+        response = self.client.post(f"{CREDITS}{refund['id']}/receive/", {}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_receive_date_cannot_be_in_the_future(self):
+        settlement = self.replace().json()
+
+        response = self.client.post(
+            f"{CREDITS}{settlement['id']}/receive/", {"received_on": "2999-01-01"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.stock(), dec("6"))
+
+    def test_pending_replacements_can_be_listed(self):
+        first = self.replace("100.00", items=[{"product": self.oil.pk, "quantity": "1"}]).json()
+        self.replace("100.00", items=[{"product": self.oil.pk, "quantity": "1"}])
+        self.client.post(f"{CREDITS}{first['id']}/receive/", {}, format="json")
+
+        pending = self.client.get(CREDITS, {"kind": "replacement", "received_on__isnull": "true"})
+
+        self.assertEqual(pending.data["count"], 1)
+
+    def test_receiving_needs_the_create_permission(self):
+        settlement = self.replace().json()
+        position = self.make_position(self.ho, "P-viewer", purchases=("view",))
+        self.make_user("viewer", User.Role.STAFF, company=self.company, position=position)
+
+        self.authenticate("ACME-HO", "viewer")
+        response = self.client.post(f"{CREDITS}{settlement['id']}/receive/", {}, format="json")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.get(CREDITS).status_code, 200)

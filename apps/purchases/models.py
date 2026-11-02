@@ -407,8 +407,10 @@ class CreditSettlement(models.Model):
     * ``refund``: the supplier paid money back. This is cash coming in, so it
       reduces net purchase spending in the expenses summary.
     * ``adjustment``: the credit is applied against a purchase, so that
-      purchase owes less. No cash moves. This is also how replacement goods
-      are paid for: receive them as a purchase and apply the credit to it.
+      purchase owes less. No cash moves.
+    * ``replacement``: the supplier will send goods instead of money. The
+      credit is used up and the goods become **stock to receive**; when they
+      arrive, ``receive_replacement`` adds them to stock.
 
     Never edited or deleted; a mistake is voided with a reason.
     """
@@ -416,6 +418,7 @@ class CreditSettlement(models.Model):
     class Kind(models.TextChoices):
         REFUND = "refund", "Refund received"
         ADJUSTMENT = "adjustment", "Applied to a purchase"
+        REPLACEMENT = "replacement", "Replacement goods"
 
     class Status(models.TextChoices):
         ACTIVE = "active", "Active"
@@ -439,6 +442,15 @@ class CreditSettlement(models.Model):
     )
     # Only for a refund.
     method = models.CharField(max_length=10, blank=True)
+    # Only for a replacement: when the goods arrived (empty while pending).
+    received_on = models.DateField(null=True, blank=True)
+    received_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     reference = models.CharField(max_length=100, blank=True)
     notes = models.CharField(max_length=200, blank=True)
 
@@ -480,7 +492,7 @@ class CreditSettlement(models.Model):
             models.CheckConstraint(
                 condition=(
                     Q(kind="adjustment", purchase__isnull=False)
-                    | Q(kind="refund", purchase__isnull=True)
+                    | Q(kind__in=["refund", "replacement"], purchase__isnull=True)
                 ),
                 name="credit_settlement_purchase_matches_kind",
             ),
@@ -488,3 +500,34 @@ class CreditSettlement(models.Model):
 
     def __str__(self):
         return f"{self.supplier} {self.kind} {self.amount}"
+
+
+class CreditSettlementItem(models.Model):
+    """Goods a supplier owes in place of money (a ``replacement``)."""
+
+    settlement = models.ForeignKey(
+        CreditSettlement,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="credit_settlement_item_quantity_positive",
+            ),
+            models.UniqueConstraint(
+                fields=["settlement", "product"],
+                name="unique_product_per_replacement",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.product} x {self.quantity}"

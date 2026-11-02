@@ -7,6 +7,7 @@ from apps.inventory.services.products import get_products_for_business
 
 from .models import (
     CreditSettlement,
+    CreditSettlementItem,
     Purchase,
     PurchaseItem,
     PurchasePayment,
@@ -49,8 +50,17 @@ class SupplierSerializer(serializers.ModelSerializer):
     advance_paid = serializers.DecimalField(
         **MONEY, read_only=True, default=Decimal("0.00")
     )
-    credit_balance = serializers.DecimalField(
+    credit_to_pay = serializers.DecimalField(
         **MONEY, read_only=True, default=Decimal("0.00")
+    )
+    to_pay_on_order = serializers.DecimalField(
+        **MONEY, read_only=True, default=Decimal("0.00")
+    )
+    credit_to_receive = serializers.DecimalField(
+        **MONEY, read_only=True, default=Decimal("0.00")
+    )
+    stock_to_receive = serializers.DecimalField(
+        max_digits=14, decimal_places=3, read_only=True, default=Decimal("0")
     )
 
     class Meta:
@@ -68,7 +78,10 @@ class SupplierSerializer(serializers.ModelSerializer):
             "total_purchased",
             "outstanding",
             "advance_paid",
-            "credit_balance",
+            "credit_to_pay",
+            "to_pay_on_order",
+            "credit_to_receive",
+            "stock_to_receive",
             "created_at",
             "updated_at",
         )
@@ -486,6 +499,27 @@ class PurchaseReturnSerializer(serializers.ModelSerializer):
 # Using the credit
 # ---------------------------------------------------------------------------
 
+class ReceiveReplacementSerializer(serializers.Serializer):
+    received_on = serializers.DateField(required=False)
+
+    def validate_received_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+
+class CreditSettlementItemSerializer(serializers.ModelSerializer):
+    product = CatalogProductField()
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    quantity = serializers.DecimalField(**QUANTITY)
+
+    class Meta:
+        model = CreditSettlementItem
+        fields = ("id", "product", "product_name", "quantity")
+        read_only_fields = ("id",)
+
+
 class CreditSettlementSerializer(serializers.ModelSerializer):
     supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.objects.none())
     supplier_name = serializers.CharField(source="supplier.name", read_only=True)
@@ -499,6 +533,8 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
     method = serializers.ChoiceField(
         choices=PurchasePayment.Method.choices, required=False, allow_blank=True
     )
+    items = CreditSettlementItemSerializer(many=True, required=False)
+    delivery_status = serializers.SerializerMethodField()
 
     class Meta:
         model = CreditSettlement
@@ -512,6 +548,9 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
             "purchase",
             "purchase_no",
             "method",
+            "items",
+            "delivery_status",
+            "received_on",
             "reference",
             "notes",
             "status",
@@ -519,7 +558,9 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
             "void_reason",
             "created_at",
         )
-        read_only_fields = ("id", "status", "voided_at", "void_reason", "created_at")
+        read_only_fields = (
+            "id", "status", "received_on", "voided_at", "void_reason", "created_at",
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -533,6 +574,13 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
 
     def get_purchase_no(self, obj):
         return obj.purchase.purchase_no if obj.purchase_id else None
+
+    def get_delivery_status(self, obj):
+        """``pending`` while the replacement goods are still to arrive."""
+        if obj.kind != CreditSettlement.Kind.REPLACEMENT:
+            return None
+
+        return "received" if obj.received_on else "pending"
 
     def validate_settled_on(self, value):
         if value > timezone.localdate():
@@ -552,6 +600,22 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
             if attrs.get("method"):
                 raise serializers.ValidationError(
                     {"method": "A method applies to refunds only."}
+                )
+
+        elif kind == CreditSettlement.Kind.REPLACEMENT:
+            if attrs.get("purchase"):
+                raise serializers.ValidationError(
+                    {"purchase": "A replacement is not applied to a purchase."}
+                )
+
+            if attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "A method applies to refunds only."}
+                )
+
+            if not attrs.get("items"):
+                raise serializers.ValidationError(
+                    {"items": "List the goods the supplier will send."}
                 )
 
         else:
