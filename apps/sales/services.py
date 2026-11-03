@@ -31,6 +31,7 @@ from .models import (
     EmiInstallment,
     Followup,
     Sale,
+    SaleCreditSettlement,
     SaleItem,
     SalePayment,
 )
@@ -252,6 +253,47 @@ def paid_total(sale):
     )
 
 
+def credit_applied_total(sale):
+    """Customer credit already set against this sale."""
+    return (
+        sale.credit_settlements.filter(
+            kind=SaleCreditSettlement.Kind.ADJUSTMENT,
+            status=SaleCreditSettlement.Status.ACTIVE,
+        ).aggregate(total=Sum("amount"))["total"]
+        or ZERO
+    )
+
+
+def returns_applied_total(sale):
+    """What returned goods took off what the customer owed on this sale."""
+    return (
+        sale.returns.filter(status="active").aggregate(
+            total=Sum("applied_amount")
+        )["total"]
+        or ZERO
+    )
+
+
+def settled_total(sale):
+    """
+    Received in money, plus credit applied, plus what returned goods took
+    off: everything that no longer has to be paid on the sale.
+    """
+    return (
+        paid_total(sale)
+        + credit_applied_total(sale)
+        + returns_applied_total(sale)
+    )
+
+
+def emi_ended_by_return(sale):
+    """The bike of an EMI sale came back: no more instalments are due."""
+    return (
+        sale.payment_mode == Sale.PaymentMode.EMI
+        and sale.returns.filter(status="active").exists()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Create, edit, cancel
 # ---------------------------------------------------------------------------
@@ -346,13 +388,13 @@ def update_sale(*, sale, items=None, **header):
         setattr(sale, field, value)
 
     sale.finance_charge = _check_terms(sale, totals["net_total"])
-    paid = paid_total(sale)
+    paid = settled_total(sale)
 
     if sale.amount_due < paid:
         raise serializers.ValidationError({
             "items": (
-                f"The new total is less than the {paid} already received. "
-                "Void a payment first."
+                f"The new total is less than the {paid} already received or "
+                "covered by credit. Void a payment first."
             )
         })
 
@@ -369,9 +411,13 @@ def update_sale(*, sale, items=None, **header):
 def cancel_sale(*, sale, user, reason):
     sale = _lock_draft(sale)
 
-    if sale.payments.filter(status=SalePayment.Status.ACTIVE).exists():
+    if (
+        sale.payments.filter(status=SalePayment.Status.ACTIVE).exists()
+        or credit_applied_total(sale) > 0
+    ):
         raise Conflict(
-            "Void the payments of this sale before cancelling it.",
+            "Void the payments and applied credit of this sale before "
+            "cancelling it.",
             code="payments_exist",
         )
 
@@ -522,7 +568,7 @@ def _create_followups(sale):
                 amount=installment.amount,
             )
 
-    elif sale.amount_due > paid_total(sale):
+    elif sale.amount_due > settled_total(sale):
         Followup.objects.create(
             business=sale.business,
             sale=sale,
@@ -530,7 +576,7 @@ def _create_followups(sale):
             kind=Followup.Kind.CREDIT_DUE,
             due_date=sale.due_date
             or sale.sale_date + timedelta(days=CREDIT_FOLLOWUP_DAYS),
-            amount=sale.amount_due - paid_total(sale),
+            amount=sale.amount_due - settled_total(sale),
         )
 
     if sale.sale_type == Sale.SaleType.MAINTENANCE:
@@ -555,6 +601,7 @@ def installment_rows(sale):
     """
     pool = max(ZERO, paid_total(sale) - sale.down_payment)
     today = timezone.localdate()
+    ended = emi_ended_by_return(sale)
     rows = []
 
     for installment in sale.installments.all():
@@ -563,6 +610,8 @@ def installment_rows(sale):
 
         if paid >= installment.amount:
             state = "paid"
+        elif ended:
+            state = "cancelled"
         elif installment.due_date < today:
             state = "overdue"
         else:
@@ -587,9 +636,10 @@ def sync_followups(sale):
     person marked done or skipped are left alone.
     """
     covered = {
-        row["id"]: row["status"] == "paid" for row in installment_rows(sale)
+        row["id"]: row["status"] in ("paid", "cancelled")
+        for row in installment_rows(sale)
     }
-    remaining = sale.amount_due - paid_total(sale)
+    remaining = sale.amount_due - settled_total(sale)
     today = timezone.localdate()
 
     for followup in sale.followups.exclude(kind__in=MAINTENANCE_KINDS):
@@ -693,12 +743,14 @@ def create_payment(*, sale, user, amount, paid_on, method,
     if sale.status == Sale.Status.CANCELLED:
         raise Conflict("A cancelled sale cannot take payment.", code="invalid_status")
 
-    paid = paid_total(sale)
+    settled = settled_total(sale)
     amount = money(amount)
 
-    if paid + amount > sale.amount_due:
+    if settled + amount > sale.amount_due:
         raise serializers.ValidationError({
-            "amount": f"This is more than is still due ({sale.amount_due - paid})."
+            "amount": (
+                f"This is more than is still due ({sale.amount_due - settled})."
+            )
         })
 
     payment = SalePayment.objects.create(
@@ -726,6 +778,12 @@ def void_payment(*, payment, user, reason):
 
     if payment.status != SalePayment.Status.ACTIVE:
         raise Conflict("This payment is already void.", code="invalid_status")
+
+    if sale.returns.filter(status="active").exists():
+        raise Conflict(
+            "This sale has returned goods. Void the return first.",
+            code="returns_exist",
+        )
 
     left = paid_total(sale) - payment.amount
 

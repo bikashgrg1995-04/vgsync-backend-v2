@@ -1,6 +1,16 @@
 from django.contrib import admin
 
-from .models import BikeUnit, Customer, EmiInstallment, Followup, Sale, SaleItem, SalePayment
+from .models import (
+    BikeUnit,
+    Customer,
+    EmiInstallment,
+    Followup,
+    Sale,
+    SaleCreditSettlement,
+    SaleItem,
+    SalePayment,
+    SaleReturn,
+)
 
 
 @admin.register(Customer)
@@ -60,3 +70,15 @@ class BikeUnitAdmin(ReadOnlyAdmin):
 class FollowupAdmin(ReadOnlyAdmin):
     list_display = ("kind", "sale", "due_date", "status")
     list_filter = ("kind", "status")
+
+
+@admin.register(SaleReturn)
+class SaleReturnAdmin(ReadOnlyAdmin):
+    list_display = ("return_no", "sale", "customer", "applied_amount", "credit_amount", "status")
+    list_filter = ("status", "business")
+
+
+@admin.register(SaleCreditSettlement)
+class SaleCreditSettlementAdmin(ReadOnlyAdmin):
+    list_display = ("kind", "customer", "amount", "settled_on", "status")
+    list_filter = ("kind", "status", "business")

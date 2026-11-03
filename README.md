@@ -17,9 +17,9 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments, purchase returns and supplier credit (needs the `purchases` permission) | API |
-| Sales: stock, bike (full payment or EMI) and maintenance sales, customers, confirming (stock out, invoice number), customer payments, credit to receive, follow-ups and income (needs the `sales` permission) | API |
+| Sales: stock, bike (full payment or EMI) and maintenance sales, customers, confirming (stock out, invoice number), customer payments, credit to receive, sale returns and customer credit to pay, follow-ups and income (needs the `sales` permission) | API |
 | Company / business management APIs | Not yet implemented |
-| Sale returns, orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
+| Orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
 ## Tech stack
 
@@ -42,7 +42,7 @@ apps/
   inventory/         Inventory foundation (products, stock, transfers)
   payroll/           Pay setup, entries, payments and balances
   purchases/         Suppliers, purchases, receiving stock and supplier payments
-  sales/             Customers, sales, confirming (stock out) and customer payments
+  sales/             Customers, bikes, sales, EMI, follow-ups, returns and customer payments
   finance/           Expenses and income (salary, supplier and customer payments are added automatically)
 ```
 
@@ -455,7 +455,7 @@ draft  --confirm-->  confirmed          (stock goes down, once; invoice number g
 draft  --cancel-->   cancelled
 ```
 
-A draft can be edited freely and has no effect on stock. `confirm` takes every line out of the business's stock through the inventory stock service (one `sale_issue` movement per line, referencing `INV-000001`), all or nothing, and only once; if one line has too little stock nothing is taken. A confirmed sale cannot be edited or cancelled; sale returns will handle corrections.
+A draft can be edited freely and has no effect on stock. `confirm` takes every line out of the business's stock through the inventory stock service (one `sale_issue` movement per line, referencing `INV-000001`), all or nothing, and only once; if one line has too little stock nothing is taken. A confirmed sale cannot be edited or cancelled; corrections are done with a sale return (below).
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -491,6 +491,53 @@ Rules:
 - Only active products of the business's catalog can be sold; sale-only local products are not part of this yet.
 - Customers belong to one business; a phone number can be used once per business. Sales, customers and payments of one business are never visible to another.
 
+### Sale returns and customer credit
+
+Two ledgers per customer, kept apart:
+
+- **Credit to receive** (`credit_to_receive`): what the customer still owes you.
+- **Credit to pay** (`credit_to_pay`): what you owe the customer after a return. Returned goods do not always mean money back: it can be refunded, set against another sale, or given as other goods.
+
+```
+return  -->  goods back in stock; value first takes off what the customer still owes on that sale
+        -->  whatever is left over is credit to pay                  (no cash moves, income unchanged)
+credit  -->  refund       cash goes back to the customer             (credit down; reduces net income)
+        -->  adjustment   set against what the customer owes on another sale  (credit down; that sale owes less)
+        -->  replacement  other goods given instead                  (credit down; goods become stock_to_give;
+                                                                       stock goes down only when delivered)
+```
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/sales/returns/` | List (filters: `sale`, `customer`, `status`, `return_date__gte`, `return_date__lte`) or return goods of a **confirmed** sale |
+| `GET` | `/sales/returns/{id}/` | View a return (`SRT-000001`) |
+| `POST` | `/sales/returns/{id}/void/` | Undo a return, with a `reason`: goods go out of stock again and its effect on the sale and credit is removed |
+| `GET`, `POST` | `/sales/credits/` | List (filters: `customer`, `kind`, `status`, `sale`, `pending=true`) or use credit |
+| `POST` | `/sales/credits/{id}/deliver/` | The replacement goods were handed over: take them out of stock (once; optional `delivered_on`) |
+| `POST` | `/sales/credits/{id}/void/` | Undo a refund, adjustment or a replacement not yet delivered, with a `reason` |
+
+Return: `{"sale": 5, "reason": "Wrong part", "items": [{"sale_item": 11, "quantity": "4", "stock_condition": "good"}]}`. `stock_condition` is `good` (default) or `damaged`, the stock the goods go back into. Each sale line shows `returned_quantity` and `returnable_quantity`; a sale shows `returned_amount` (what returns took off what is owed) and `credit_applied` (credit set against it).
+
+What can be returned:
+
+- **Stock sale:** any line, in parts, until nothing is left.
+- **Maintenance:** the parts only. A service charge cannot be returned.
+- **Bike:** the bike is returned as a whole, into good stock; its unit is in stock again and can be sold again. Returning the bike of an **EMI** sale ends the sale: the instalments still to come are cancelled (`cancelled`), their follow-ups close, and everything the customer paid becomes credit to pay.
+
+Use credit with `POST /sales/credits/`:
+
+- Refund: `{"customer": 2, "kind": "refund", "amount": "600.00", "method": "bank"}`.
+- Set against another sale: `{"customer": 2, "kind": "adjustment", "amount": "400.00", "sale": 9}` (not for an EMI sale).
+- Replacement goods: `{"customer": 2, "kind": "replacement", "amount": "400.00", "items": [{"product": 3, "quantity": "2"}]}`. The goods show as `stock_to_give` and `delivery_status: "pending"` until `deliver` takes them out of stock (one `sale_issue` movement per product). A delivered replacement cannot be voided.
+
+Rules:
+
+- A line must belong to the chosen sale, cannot be listed twice, and cannot be returned beyond what is left. Value of a line is its amount less its share of the discount, plus VAT; the values never add up to more than the sale.
+- A **walk-in** return has no customer to hold credit, so it is refunded with the return: send `refund_method` (`cash`, `bank`, `online`, `cheque`) and optionally `reference`. A customer return takes no `refund_method`.
+- Credit cannot go below zero, and an adjustment cannot exceed what the other sale still owes. It cannot be used by another customer.
+- A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund, adjustment or replacement first. Voiding a walk-in return voids its refund too. A payment of a sale with an active return cannot be voided (`409`, `returns_exist`).
+- Returns and settlements are never edited or deleted.
+
 ### Kinds of sale
 
 `sale_type` says what is sold (it is fixed once the draft is made):
@@ -512,7 +559,7 @@ down_payment + emi_months x emi_amount - net_total  =  finance_charge   (cannot 
 amount due = net_total + finance_charge
 ```
 
-The down payment must be received before the sale can be confirmed (`409`, `down_payment_due`) and an EMI needs a customer. Confirming creates the monthly instalments; `GET /sales/{id}/` shows them as `installments`, each with `paid_amount` and a status (`paid`, `partial`, `upcoming`, `overdue`). Money received after the down payment covers the instalments in order, so the schedule is always worked out from the payments and never typed in. Payments cannot exceed the amount due, and the down payment of a confirmed EMI sale cannot be voided.
+The down payment must be received before the sale can be confirmed (`409`, `down_payment_due`) and an EMI needs a customer. Confirming creates the monthly instalments; `GET /sales/{id}/` shows them as `installments`, each with `paid_amount` and a status (`paid`, `partial`, `upcoming`, `overdue`, or `cancelled` once the bike is returned). Money received after the down payment covers the instalments in order, so the schedule is always worked out from the payments and never typed in. Payments cannot exceed the amount due, and the down payment of a confirmed EMI sale cannot be voided.
 
 ### Follow-ups
 
@@ -529,7 +576,7 @@ Follow-ups are created by the system when a sale is confirmed. They are listed a
 
 ### Income
 
-Every customer payment is added to income automatically in the category of its sale (`stock_sale`, `bike_sale`, `maintenance`), on the day it is received; money not yet received stays as credit to receive and is not income. Voiding the payment voids its income. See `GET /finance/income/` below.
+Every customer payment is added to income automatically in the category of its sale (`stock_sale`, `bike_sale`, `maintenance`), on the day it is received; money not yet received stays as credit to receive and is not income. Voiding the payment voids its income. Cash refunded to customers for returned goods is not entered as negative income; it is subtracted in the summary instead (see below).
 
 ## Expenses API (owner only)
 
@@ -552,9 +599,11 @@ Supplier refunds are cash coming back, so the summary subtracts them: `net_total
 | --- | --- | --- |
 | `GET`, `POST` | `/finance/income/` | List (filters: `category`, `status`, `payment_method`, `income_date__gte`, `income_date__lte`) or add other income |
 | `POST` | `/finance/income/{id}/void/` | Void manual income, with a reason |
-| `GET` | `/finance/income/summary/` | Totals of active income by category, for the same filters |
+| `GET` | `/finance/income/summary/` | `total`, `sale_refunds`, `net_total` and `by_category` of active income, for the same filters |
 
 Categories: `stock_sale`, `bike_sale`, `maintenance`, `other`. The sale categories come from customer payments and are read-only (`409`, `payment_income_locked`); void the payment instead. Only `other` can be entered by hand. Income belongs to the active business.
+
+Refunds are cash going back to customers, so `net_total = total - sale_refunds`. A refund belongs to a customer rather than to one kind of sale, so a `category` filter leaves refunds out. A return, credit set against a sale and replacement goods never change income.
 
 ## Lists
 

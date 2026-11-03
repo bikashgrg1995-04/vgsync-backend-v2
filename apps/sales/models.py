@@ -560,3 +560,300 @@ class Followup(models.Model):
 
     def __str__(self):
         return f"{self.kind} {self.due_date}"
+
+
+# ---------------------------------------------------------------------------
+# Returns from customers
+# ---------------------------------------------------------------------------
+
+class SaleReturn(models.Model):
+    """
+    Goods a customer brought back from a confirmed sale: stock goods, a
+    bike, or the parts of a maintenance sale (a service charge is not
+    returned). Returning puts the goods back into stock (a bike unit goes
+    back in stock) and is worth the value of what came back, with its share
+    of the discount and VAT (``goods_value``). That value first reduces what
+    the customer still owes on the same sale (``applied_amount``); whatever
+    is left is a **credit to pay** to the customer (``credit_amount``),
+    kept apart from what the customer owes. It is used up by a refund, by
+    applying it to another sale, or by giving other goods (see
+    ``SaleCreditSettlement``).
+
+    Returning the bike of an EMI sale ends the sale: the instalments still
+    to come are cancelled, and everything the customer paid becomes credit.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="sale_returns",
+    )
+    # 1, 2, 3 ... within the business; shown as SRT-000001.
+    number = models.PositiveIntegerField()
+    sale = models.ForeignKey(
+        Sale,
+        on_delete=models.PROTECT,
+        related_name="returns",
+    )
+    # Empty for a walk-in sale, which is refunded straight away.
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="returns",
+    )
+    return_date = models.DateField()
+    reason = models.TextField()
+    notes = models.TextField(blank=True)
+    # Taken off what the customer still owed on this sale.
+    applied_amount = models.DecimalField(**MONEY, default=ZERO)
+    # Left over after that: what is now owed back to the customer.
+    credit_amount = models.DecimalField(**MONEY, default=ZERO)
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-return_date", "-number"]
+        indexes = [
+            models.Index(fields=["business", "status", "return_date"]),
+            models.Index(fields=["customer", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["business", "number"],
+                name="unique_sale_return_number_per_business",
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_amount__gte=0) & Q(applied_amount__gte=0),
+                name="sale_return_credit_non_negative",
+            ),
+        ]
+
+    @property
+    def return_no(self):
+        return f"SRT-{self.number:06d}"
+
+    def __str__(self):
+        return self.return_no
+
+
+class SaleReturnItem(models.Model):
+    sale_return = models.ForeignKey(
+        SaleReturn,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    sale_item = models.ForeignKey(
+        SaleItem,
+        on_delete=models.PROTECT,
+        related_name="return_items",
+    )
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        related_name="sale_return_items",
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # Which stock the goods go back into.
+    stock_condition = models.CharField(max_length=10, default="good")
+    # The value of these goods (with their share of discount and VAT).
+    credit_amount = models.DecimalField(**MONEY, default=ZERO)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="sale_return_item_quantity_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_amount__gte=0),
+                name="sale_return_item_credit_non_negative",
+            ),
+        ]
+
+
+class SaleCreditSettlement(models.Model):
+    """
+    Use of a customer's credit to pay. Every way reduces the credit:
+
+    * ``refund``: money handed back to the customer. This is cash going out,
+      so it reduces net income in the income summary.
+    * ``adjustment``: the credit is set against what the customer still owes
+      on another (non-EMI) sale. No cash moves.
+    * ``replacement``: other goods are given instead of money. The credit is
+      used up and the goods are **stock to give** until they are delivered;
+      ``deliver`` then takes them out of stock.
+
+    A walk-in return has no customer, so its refund is made together with the
+    return (``sale_return`` is set). Never edited or deleted; a mistake is
+    voided with a reason.
+    """
+
+    class Kind(models.TextChoices):
+        REFUND = "refund", "Refund paid"
+        ADJUSTMENT = "adjustment", "Set against a sale"
+        REPLACEMENT = "replacement", "Replacement goods"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        VOID = "void", "Void"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="sale_credit_settlements",
+    )
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="credit_settlements",
+    )
+    # Set for the refund of a walk-in return.
+    sale_return = models.ForeignKey(
+        SaleReturn,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="settlements",
+    )
+    kind = models.CharField(max_length=12, choices=Kind.choices)
+    amount = models.DecimalField(**MONEY)
+    settled_on = models.DateField()
+    # Only for an adjustment: the sale the credit is set against.
+    sale = models.ForeignKey(
+        Sale,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="credit_settlements",
+    )
+    # Only for a refund.
+    method = models.CharField(max_length=10, blank=True)
+    # Only for a replacement: when the goods were handed over (empty while
+    # they are still to be delivered).
+    delivered_on = models.DateField(null=True, blank=True)
+    delivered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    reference = models.CharField(max_length=100, blank=True)
+    notes = models.CharField(max_length=200, blank=True)
+
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-settled_on", "-id"]
+        indexes = [
+            models.Index(fields=["business", "kind", "status"]),
+            models.Index(fields=["customer", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="sale_credit_amount_positive",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(kind="refund", sale__isnull=True) & ~Q(method="")
+                    | Q(kind="adjustment", sale__isnull=False, method="")
+                    | Q(kind="replacement", sale__isnull=True, method="")
+                ),
+                name="sale_credit_fields_match_kind",
+            ),
+            # Without a customer the only possible thing is the immediate
+            # refund of a walk-in return.
+            models.CheckConstraint(
+                condition=Q(customer__isnull=False)
+                | Q(kind="refund", sale_return__isnull=False),
+                name="sale_credit_customer_or_walk_in_refund",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.amount}"
+
+
+class SaleCreditSettlementItem(models.Model):
+    """Goods owed to a customer in place of money (a ``replacement``)."""
+
+    settlement = models.ForeignKey(
+        SaleCreditSettlement,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="sale_credit_item_quantity_positive",
+            ),
+            models.UniqueConstraint(
+                fields=["settlement", "product"],
+                name="unique_product_per_sale_replacement",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.product} x {self.quantity}"

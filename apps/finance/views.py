@@ -200,7 +200,10 @@ class IncomeViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def summary(self, request):
-        """Totals by category for the filtered, active income."""
+        """
+        Totals by category for the filtered, active income, and the same
+        total net of refunds paid back to customers (``net_total``).
+        """
         queryset = self.filter_queryset(self.get_queryset()).filter(
             status=Income.Status.ACTIVE
         )
@@ -212,9 +215,12 @@ class IncomeViewSet(viewsets.ModelViewSet):
         )
 
         total = sum((row["total"] for row in rows), Decimal("0"))
+        refunds = self._sale_refunds(request)
 
         return Response({
             "total": f"{total:.2f}",
+            "sale_refunds": f"{refunds:.2f}",
+            "net_total": f"{total - refunds:.2f}",
             "by_category": [
                 {
                     "category": row["category"],
@@ -224,3 +230,33 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 for row in rows
             ],
         })
+
+    @staticmethod
+    def _sale_refunds(request):
+        """
+        Cash paid back to customers for returned goods in the same period.
+        It reduces what was really earned. A return, credit set against a
+        sale, or replacement goods move no cash and change nothing here.
+        A refund belongs to a customer, not to one kind of sale, so a
+        ``category`` filter leaves refunds out.
+        """
+        from apps.sales.models import SaleCreditSettlement
+
+        query = request.query_params
+
+        if query.get("category") not in (None, ""):
+            return Decimal("0")
+
+        refunds = SaleCreditSettlement.objects.filter(
+            business=request.active_business,
+            kind=SaleCreditSettlement.Kind.REFUND,
+            status=SaleCreditSettlement.Status.ACTIVE,
+        )
+
+        if day := parse_date(query.get("income_date__gte") or ""):
+            refunds = refunds.filter(settled_on__gte=day)
+
+        if day := parse_date(query.get("income_date__lte") or ""):
+            refunds = refunds.filter(settled_on__lte=day)
+
+        return refunds.aggregate(total=Sum("amount"))["total"] or Decimal("0")

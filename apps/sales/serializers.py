@@ -1,12 +1,30 @@
 from decimal import Decimal
 
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
 from apps.inventory.services.products import get_products_for_business
 
-from .models import BikeUnit, Customer, Followup, Sale, SaleItem, SalePayment
-from .services import installment_rows, paid_total, payment_status
+from .models import (
+    BikeUnit,
+    Customer,
+    Followup,
+    Sale,
+    SaleCreditSettlement,
+    SaleCreditSettlementItem,
+    SaleItem,
+    SalePayment,
+    SaleReturn,
+    SaleReturnItem,
+)
+from .services import (
+    credit_applied_total,
+    installment_rows,
+    paid_total,
+    payment_status,
+    returns_applied_total,
+)
 
 MONEY = {"max_digits": 12, "decimal_places": 2}
 POSITIVE = {**MONEY, "min_value": Decimal("0.01")}
@@ -36,6 +54,12 @@ class CustomerSerializer(serializers.ModelSerializer):
     advance_received = serializers.DecimalField(
         **MONEY, read_only=True, default=Decimal("0.00")
     )
+    credit_to_pay = serializers.DecimalField(
+        **MONEY, read_only=True, default=Decimal("0.00")
+    )
+    stock_to_give = serializers.DecimalField(
+        max_digits=14, decimal_places=3, read_only=True, default=Decimal("0")
+    )
 
     class Meta:
         model = Customer
@@ -51,6 +75,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             "total_sales",
             "credit_to_receive",
             "advance_received",
+            "credit_to_pay",
+            "stock_to_give",
             "created_at",
             "updated_at",
         )
@@ -225,6 +251,8 @@ class SaleItemSerializer(serializers.ModelSerializer):
     stock_no = serializers.CharField(source="product.stock_no", default="", read_only=True)
     chassis_no = serializers.CharField(source="bike_unit.chassis_no", default=None, read_only=True)
     engine_no = serializers.CharField(source="bike_unit.engine_no", default=None, read_only=True)
+    returned_quantity = serializers.SerializerMethodField()
+    returnable_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = SaleItem
@@ -240,7 +268,32 @@ class SaleItemSerializer(serializers.ModelSerializer):
             "quantity",
             "unit_price",
             "line_total",
+            "returned_quantity",
+            "returnable_quantity",
         )
+
+    def _returned(self, obj):
+        # The detail view annotates this; otherwise ask the database.
+        annotated = getattr(obj, "returned", None)
+
+        if annotated is not None:
+            return annotated
+
+        return (
+            obj.return_items.filter(sale_return__status="active").aggregate(
+                total=Sum("quantity")
+            )["total"]
+            or Decimal("0")
+        )
+
+    def get_returned_quantity(self, obj):
+        return f"{self._returned(obj):.3f}"
+
+    def get_returnable_quantity(self, obj):
+        if obj.product_id is None:
+            return "0.000"
+
+        return f"{obj.quantity - self._returned(obj):.3f}"
 
     def get_product_name(self, obj):
         return obj.product.name if obj.product_id else obj.description
@@ -295,6 +348,8 @@ class SaleSerializer(serializers.ModelSerializer):
 
     amount_due = serializers.DecimalField(**MONEY, read_only=True)
     paid_amount = serializers.SerializerMethodField()
+    credit_applied = serializers.SerializerMethodField()
+    returned_amount = serializers.SerializerMethodField()
     remaining_amount = serializers.SerializerMethodField()
     payment_status = serializers.SerializerMethodField()
 
@@ -329,6 +384,8 @@ class SaleSerializer(serializers.ModelSerializer):
             "vehicle_chassis_no",
             "vehicle_reg_no",
             "paid_amount",
+            "credit_applied",
+            "returned_amount",
             "remaining_amount",
             "payment_status",
             "notes",
@@ -345,6 +402,19 @@ class SaleSerializer(serializers.ModelSerializer):
 
         return annotated if annotated is not None else paid_total(obj)
 
+    def _credit(self, obj):
+        annotated = getattr(obj, "credit", None)
+
+        return annotated if annotated is not None else credit_applied_total(obj)
+
+    def _returned_applied(self, obj):
+        annotated = getattr(obj, "returned_applied", None)
+
+        return annotated if annotated is not None else returns_applied_total(obj)
+
+    def _settled(self, obj):
+        return self._paid(obj) + self._credit(obj) + self._returned_applied(obj)
+
     def get_customer_name(self, obj):
         if obj.customer_id:
             return obj.customer.name
@@ -354,11 +424,19 @@ class SaleSerializer(serializers.ModelSerializer):
     def get_paid_amount(self, obj):
         return f"{self._paid(obj):.2f}"
 
+    def get_credit_applied(self, obj):
+        """Customer credit from earlier returns set against this sale."""
+        return f"{self._credit(obj):.2f}"
+
+    def get_returned_amount(self, obj):
+        """What returned goods took off what the customer owed here."""
+        return f"{self._returned_applied(obj):.2f}"
+
     def get_remaining_amount(self, obj):
-        return f"{obj.amount_due - self._paid(obj):.2f}"
+        return f"{obj.amount_due - self._settled(obj):.2f}"
 
     def get_payment_status(self, obj):
-        return payment_status(obj.amount_due, self._paid(obj))
+        return payment_status(obj.amount_due, self._settled(obj))
 
 
 class InstallmentSerializer(serializers.Serializer):
@@ -563,3 +641,279 @@ class FollowupSkipSerializer(serializers.Serializer):
     note = serializers.CharField(
         max_length=300, allow_blank=False, trim_whitespace=True
     )
+
+
+# ---------------------------------------------------------------------------
+# Returns from customers
+# ---------------------------------------------------------------------------
+
+class SaleItemField(serializers.PrimaryKeyRelatedField):
+    """A line of a sale of the active business."""
+
+    default_error_messages = {
+        "does_not_exist": "This sale line does not exist.",
+    }
+
+    def get_queryset(self):
+        return SaleItem.objects.filter(
+            sale__business=self.context["request"].active_business
+        ).select_related("product", "bike_unit")
+
+
+class SaleReturnItemInputSerializer(serializers.Serializer):
+    sale_item = SaleItemField()
+    quantity = serializers.DecimalField(**QUANTITY)
+    stock_condition = serializers.ChoiceField(
+        choices=[("good", "Good"), ("damaged", "Damaged")],
+        default="good",
+        help_text="Which stock the goods go back into.",
+    )
+
+
+class SaleReturnWriteSerializer(serializers.Serializer):
+    sale = serializers.PrimaryKeyRelatedField(queryset=Sale.objects.none())
+    return_date = serializers.DateField(required=False)
+    reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    items = SaleReturnItemInputSerializer(many=True, allow_empty=False, max_length=200)
+    refund_method = serializers.ChoiceField(
+        choices=SalePayment.Method.choices,
+        required=False,
+        allow_blank=True,
+        help_text="Walk-in sales only: how the money is paid back now.",
+    )
+    reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        request = self.context.get("request")
+
+        if request is not None:
+            self.fields["sale"].queryset = Sale.objects.filter(
+                business=request.active_business
+            )
+
+    def validate_return_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+
+class SaleReturnItemSerializer(serializers.ModelSerializer):
+    stock_no = serializers.CharField(source="product.stock_no", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    unit_price = serializers.DecimalField(
+        source="sale_item.unit_price", max_digits=12, decimal_places=2, read_only=True
+    )
+    chassis_no = serializers.CharField(
+        source="sale_item.bike_unit.chassis_no", default=None, read_only=True
+    )
+
+    class Meta:
+        model = SaleReturnItem
+        fields = (
+            "id",
+            "sale_item",
+            "product",
+            "stock_no",
+            "product_name",
+            "chassis_no",
+            "quantity",
+            "unit_price",
+            "stock_condition",
+            "credit_amount",
+        )
+
+
+class SaleReturnSerializer(serializers.ModelSerializer):
+    return_no = serializers.CharField(read_only=True)
+    sale_no = serializers.CharField(source="sale.sale_no", read_only=True)
+    invoice_no = serializers.CharField(source="sale.invoice_no", read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    items = SaleReturnItemSerializer(many=True, read_only=True)
+    goods_value = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SaleReturn
+        fields = (
+            "id",
+            "return_no",
+            "number",
+            "sale",
+            "sale_no",
+            "invoice_no",
+            "customer",
+            "customer_name",
+            "return_date",
+            "reason",
+            "notes",
+            "goods_value",
+            "applied_amount",
+            "credit_amount",
+            "status",
+            "voided_at",
+            "void_reason",
+            "items",
+            "created_at",
+        )
+
+    def get_customer_name(self, obj):
+        if obj.customer_id:
+            return obj.customer.name
+
+        return obj.sale.walk_in_name or "Walk-in"
+
+    def get_goods_value(self, obj):
+        """The value of what came back; ``applied_amount`` + ``credit_amount``
+        except on an EMI sale, which ends."""
+        return f"{sum((i.credit_amount for i in obj.items.all()), Decimal('0')):.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Using the credit
+# ---------------------------------------------------------------------------
+
+class DeliverReplacementSerializer(serializers.Serializer):
+    delivered_on = serializers.DateField(required=False)
+
+    def validate_delivered_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+
+class SaleCreditSettlementItemSerializer(serializers.ModelSerializer):
+    product = CatalogProductField()
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    quantity = serializers.DecimalField(**QUANTITY)
+
+    class Meta:
+        model = SaleCreditSettlementItem
+        fields = ("id", "product", "product_name", "quantity")
+        read_only_fields = ("id",)
+
+
+class SaleCreditSettlementSerializer(serializers.ModelSerializer):
+    customer = serializers.PrimaryKeyRelatedField(queryset=Customer.objects.none())
+    customer_name = serializers.SerializerMethodField()
+    sale = serializers.PrimaryKeyRelatedField(
+        queryset=Sale.objects.none(), required=False, allow_null=True
+    )
+    sale_no = serializers.SerializerMethodField()
+    kind = serializers.ChoiceField(choices=SaleCreditSettlement.Kind.choices)
+    amount = serializers.DecimalField(**POSITIVE)
+    settled_on = serializers.DateField(required=False)
+    method = serializers.ChoiceField(
+        choices=SalePayment.Method.choices, required=False, allow_blank=True
+    )
+    items = SaleCreditSettlementItemSerializer(many=True, required=False)
+    delivery_status = serializers.SerializerMethodField()
+    return_no = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SaleCreditSettlement
+        fields = (
+            "id",
+            "customer",
+            "customer_name",
+            "kind",
+            "amount",
+            "settled_on",
+            "sale",
+            "sale_no",
+            "return_no",
+            "method",
+            "items",
+            "delivery_status",
+            "delivered_on",
+            "reference",
+            "notes",
+            "status",
+            "voided_at",
+            "void_reason",
+            "created_at",
+        )
+        read_only_fields = (
+            "id", "status", "delivered_on", "voided_at", "void_reason", "created_at",
+        )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        request = self.context.get("request")
+
+        if request is not None:
+            business = request.active_business
+            self.fields["customer"].queryset = Customer.objects.filter(business=business)
+            self.fields["sale"].queryset = Sale.objects.filter(business=business)
+
+    def get_customer_name(self, obj):
+        if obj.customer_id:
+            return obj.customer.name
+
+        return "Walk-in"
+
+    def get_sale_no(self, obj):
+        return obj.sale.sale_no if obj.sale_id else None
+
+    def get_return_no(self, obj):
+        return obj.sale_return.return_no if obj.sale_return_id else None
+
+    def get_delivery_status(self, obj):
+        """``pending`` while the replacement goods are still to be given."""
+        if obj.kind != SaleCreditSettlement.Kind.REPLACEMENT:
+            return None
+
+        return "delivered" if obj.delivered_on else "pending"
+
+    def validate_settled_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
+
+    def validate(self, attrs):
+        kind = attrs["kind"]
+
+        if kind == SaleCreditSettlement.Kind.ADJUSTMENT:
+            if not attrs.get("sale"):
+                raise serializers.ValidationError(
+                    {"sale": "Choose the sale to set the credit against."}
+                )
+
+            if attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "A method applies to refunds only."}
+                )
+
+        elif kind == SaleCreditSettlement.Kind.REPLACEMENT:
+            if attrs.get("sale"):
+                raise serializers.ValidationError(
+                    {"sale": "A replacement is not set against a sale."}
+                )
+
+            if attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "A method applies to refunds only."}
+                )
+
+            if not attrs.get("items"):
+                raise serializers.ValidationError(
+                    {"items": "List the goods that will be given."}
+                )
+
+        else:
+            if attrs.get("sale"):
+                raise serializers.ValidationError(
+                    {"sale": "A refund is not set against a sale."}
+                )
+
+            if not attrs.get("method"):
+                raise serializers.ValidationError(
+                    {"method": "Say how the refund was paid."}
+                )
+
+        return attrs

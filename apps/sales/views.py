@@ -7,7 +7,18 @@ from decimal import Decimal
 
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import ExpressionWrapper, F, OuterRef, Prefetch
+from django.db.models import (
+    DecimalField,
+    ExpressionWrapper,
+    F,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+)
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -18,17 +29,39 @@ from rest_framework.response import Response
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 from apps.purchases.views import MONEY_FIELD, sum_of
 
-from .models import BikeUnit, Customer, Followup, Sale, SaleItem, SalePayment
+from .models import (
+    BikeUnit,
+    Customer,
+    Followup,
+    Sale,
+    SaleCreditSettlement,
+    SaleCreditSettlementItem,
+    SaleItem,
+    SalePayment,
+    SaleReturn,
+    SaleReturnItem,
+)
+from .returns import (
+    create_return,
+    create_settlement,
+    deliver_replacement,
+    void_return,
+    void_settlement,
+)
 from .serializers import (
     BikeUnitSerializer,
     CustomerSerializer,
+    DeliverReplacementSerializer,
     FollowupDoneSerializer,
     FollowupSerializer,
     FollowupSkipSerializer,
     ReasonSerializer,
+    SaleCreditSettlementSerializer,
     SaleDetailSerializer,
     SalePatchSerializer,
     SalePaymentSerializer,
+    SaleReturnSerializer,
+    SaleReturnWriteSerializer,
     SaleSerializer,
     SaleWriteSerializer,
 )
@@ -79,6 +112,13 @@ class CustomerViewSet(SalesBaseViewSet):
     ``credit_to_receive`` is everything still owed, instalments not yet due
     included.
     ``advance_received`` is money taken on drafts that are not yet confirmed.
+
+    Money to receive and money to pay are kept apart. Returned goods first
+    take off what the customer owes on that sale, so ``credit_to_receive``
+    drops; what is left is ``credit_to_pay`` (owed back to the customer,
+    until it is refunded, set against another sale or given as goods).
+    ``stock_to_give`` is the quantity of replacement goods still to be
+    delivered to the customer.
     """
 
     serializer_class = CustomerSerializer
@@ -123,14 +163,68 @@ class CustomerViewSet(SalesBaseViewSet):
                 "sale__customer",
                 "amount",
             ),
+            _returns_applied=sum_of(
+                SaleReturn.objects.filter(
+                    customer=OuterRef("pk"), status=SaleReturn.Status.ACTIVE
+                ),
+                "customer",
+                "applied_amount",
+            ),
+            _adjusted=sum_of(
+                SaleCreditSettlement.objects.filter(
+                    sale__customer=OuterRef("pk"),
+                    sale__status=confirmed,
+                    kind=SaleCreditSettlement.Kind.ADJUSTMENT,
+                    status=SaleCreditSettlement.Status.ACTIVE,
+                ),
+                "sale__customer",
+                "amount",
+            ),
+            _credit_earned=sum_of(
+                SaleReturn.objects.filter(
+                    customer=OuterRef("pk"), status=SaleReturn.Status.ACTIVE
+                ),
+                "customer",
+                "credit_amount",
+            ),
+            _credit_used=sum_of(
+                SaleCreditSettlement.objects.filter(
+                    customer=OuterRef("pk"),
+                    status=SaleCreditSettlement.Status.ACTIVE,
+                ),
+                "customer",
+                "amount",
+            ),
+            stock_to_give=Coalesce(
+                Subquery(
+                    SaleCreditSettlementItem.objects.filter(
+                        settlement__customer=OuterRef("pk"),
+                        settlement__kind=SaleCreditSettlement.Kind.REPLACEMENT,
+                        settlement__status=SaleCreditSettlement.Status.ACTIVE,
+                        settlement__delivered_on__isnull=True,
+                    )
+                    .values("settlement__customer")
+                    .annotate(total=Sum("quantity"))
+                    .values("total")[:1],
+                    output_field=DecimalField(max_digits=14, decimal_places=3),
+                ),
+                Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=3),
+            ),
         ).annotate(
             total_sales=ExpressionWrapper(
                 F("_net") + F("_finance"), output_field=MONEY_FIELD
             )
         ).annotate(
             credit_to_receive=ExpressionWrapper(
-                F("total_sales") - F("_received"), output_field=MONEY_FIELD
-            )
+                F("total_sales") - F("_received") - F("_returns_applied")
+                - F("_adjusted"),
+                output_field=MONEY_FIELD,
+            ),
+            credit_to_pay=ExpressionWrapper(
+                F("_credit_earned") - F("_credit_used"),
+                output_field=MONEY_FIELD,
+            ),
         )
 
     def perform_create(self, serializer):
@@ -206,29 +300,60 @@ class SaleViewSet(SalesBaseViewSet):
             "amount",
         )
 
+        credit = sum_of(
+            SaleCreditSettlement.objects.filter(
+                sale=OuterRef("pk"),
+                kind=SaleCreditSettlement.Kind.ADJUSTMENT,
+                status=SaleCreditSettlement.Status.ACTIVE,
+            ),
+            "sale",
+            "amount",
+        )
+        returned_applied = sum_of(
+            SaleReturn.objects.filter(
+                sale=OuterRef("pk"), status=SaleReturn.Status.ACTIVE
+            ),
+            "sale",
+            "applied_amount",
+        )
+
+        items = SaleItem.objects.select_related("product", "bike_unit").annotate(
+            returned=Coalesce(
+                Sum(
+                    "return_items__quantity",
+                    filter=Q(return_items__sale_return__status=SaleReturn.Status.ACTIVE),
+                ),
+                Value(
+                    Decimal("0.000"),
+                    output_field=DecimalField(max_digits=14, decimal_places=3),
+                ),
+            )
+        ).order_by("id")
+
         queryset = (
             Sale.objects.filter(business=self.request.active_business)
             .select_related("customer")
-            .prefetch_related(
-                Prefetch("items", queryset=SaleItem.objects.select_related("product")),
-                "payments",
-            )
-            .annotate(paid=paid)
+            .prefetch_related(Prefetch("items", queryset=items), "payments")
+            .annotate(paid=paid, credit=credit, returned_applied=returned_applied)
             .annotate(
                 due=ExpressionWrapper(
                     F("net_total") + F("finance_charge"), output_field=MONEY_FIELD
-                )
+                ),
+                settled=ExpressionWrapper(
+                    F("paid") + F("credit") + F("returned_applied"),
+                    output_field=MONEY_FIELD,
+                ),
             )
         )
 
         wanted = self.request.query_params.get("payment_status")
 
         if wanted == "unpaid":
-            queryset = queryset.filter(paid=0)
+            queryset = queryset.filter(settled=0)
         elif wanted == "partial":
-            queryset = queryset.filter(paid__gt=0, paid__lt=F("due"))
+            queryset = queryset.filter(settled__gt=0, settled__lt=F("due"))
         elif wanted == "paid":
-            queryset = queryset.filter(paid__gte=F("due"))
+            queryset = queryset.filter(settled__gte=F("due"))
 
         return queryset
 
@@ -468,3 +593,170 @@ class FollowupViewSet(SalesBaseViewSet):
         )
 
         return Response(self.get_serializer(followup).data)
+
+
+# ---------------------------------------------------------------------------
+# Returns from customers
+# ---------------------------------------------------------------------------
+
+class SaleReturnViewSet(SalesBaseViewSet):
+    """
+    Goods customers brought back from confirmed sales: stock goods, a bike,
+    or the parts of a maintenance sale. A return puts the goods back into
+    stock; its value first takes off what the customer owes on that sale and
+    the rest is **credit to pay** to the customer. Never edited or deleted;
+    ``void`` undoes it. Filters: ``sale``, ``customer``, ``status``,
+    ``return_date__gte`` / ``__lte``.
+    """
+
+    serializer_class = SaleReturnSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "sale": ["exact"],
+        "customer": ["exact"],
+        "status": ["exact"],
+        "return_date": ["gte", "lte"],
+    }
+    search_fields = ("customer__name", "sale__walk_in_name", "reason")
+    ordering_fields = ("return_date", "number", "created_at")
+    ordering = ("-return_date", "-number")
+
+    def get_queryset(self):
+        return (
+            SaleReturn.objects.filter(business=self.request.active_business)
+            .select_related("sale", "customer")
+            .prefetch_related(
+                Prefetch(
+                    "items",
+                    queryset=SaleReturnItem.objects.select_related(
+                        "product", "sale_item__bike_unit"
+                    ),
+                )
+            )
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = SaleReturnWriteSerializer(
+            data=request.data, context=self.get_serializer_context()
+        )
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        data.setdefault("return_date", timezone.localdate())
+
+        ret = create_return(user=request.user, **data)
+        fresh = self.get_queryset().get(pk=ret.pk)
+
+        return Response(
+            self.get_serializer(fresh).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        serializer = ReasonSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        ret = void_return(
+            sale_return=self.get_object(),
+            user=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+
+        return Response(self.get_serializer(self.get_queryset().get(pk=ret.pk)).data)
+
+
+class SaleCreditViewSet(SalesBaseViewSet):
+    """
+    Use a customer's credit to pay: a ``refund`` (cash goes back), an
+    ``adjustment`` (set against what the customer owes on another, non-EMI
+    sale) or a ``replacement`` (other goods are given instead; they are
+    *stock to give* until ``deliver`` takes them out of stock). Credit cannot
+    go below zero. Never edited or deleted; ``void`` undoes it, except a
+    delivered replacement. Filters: ``customer``, ``kind``, ``status``,
+    ``sale``, ``settled_on__gte`` / ``__lte``, ``pending=true`` (replacements
+    not yet delivered).
+    """
+
+    serializer_class = SaleCreditSettlementSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    filterset_fields = {
+        "customer": ["exact"],
+        "kind": ["exact"],
+        "status": ["exact"],
+        "sale": ["exact"],
+        "settled_on": ["gte", "lte"],
+    }
+    search_fields = ("customer__name", "reference")
+    ordering_fields = ("settled_on", "amount", "created_at")
+    ordering = ("-settled_on", "-id")
+
+    def get_queryset(self):
+        queryset = (
+            SaleCreditSettlement.objects.filter(
+                business=self.request.active_business
+            )
+            .select_related("customer", "sale", "sale_return")
+            .prefetch_related("items__product")
+        )
+
+        if self.request.query_params.get("pending") in ("true", "1"):
+            queryset = queryset.filter(
+                kind=SaleCreditSettlement.Kind.REPLACEMENT,
+                status=SaleCreditSettlement.Status.ACTIVE,
+                delivered_on__isnull=True,
+            )
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+
+        settlement = create_settlement(
+            business=request.active_business,
+            customer=data["customer"],
+            user=request.user,
+            kind=data["kind"],
+            amount=data["amount"],
+            settled_on=data.get("settled_on", timezone.localdate()),
+            sale=data.get("sale"),
+            method=data.get("method", ""),
+            reference=data.get("reference", ""),
+            notes=data.get("notes", ""),
+            items=data.get("items", []),
+        )
+
+        return Response(
+            self.get_serializer(settlement).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(detail=True, methods=["post"])
+    def deliver(self, request, pk=None):
+        """The replacement goods were handed over: take them out of stock (once)."""
+        serializer = DeliverReplacementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        settlement = deliver_replacement(
+            settlement=self.get_object(),
+            user=request.user,
+            delivered_on=serializer.validated_data.get(
+                "delivered_on", timezone.localdate()
+            ),
+        )
+
+        return Response(self.get_serializer(settlement).data)
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        serializer = ReasonSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        settlement = void_settlement(
+            settlement=self.get_object(),
+            user=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+
+        return Response(self.get_serializer(settlement).data)
