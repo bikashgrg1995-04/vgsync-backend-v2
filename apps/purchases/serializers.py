@@ -11,6 +11,8 @@ from .models import (
     Purchase,
     PurchaseItem,
     PurchasePayment,
+    PurchaseReceipt,
+    PurchaseReceiptItem,
     PurchaseReturn,
     PurchaseReturnItem,
     Supplier,
@@ -62,6 +64,10 @@ class SupplierSerializer(serializers.ModelSerializer):
     stock_to_receive = serializers.DecimalField(
         max_digits=14, decimal_places=3, read_only=True, default=Decimal("0")
     )
+    # Quantity still to come on purchases that arrived in parts.
+    stock_pending_delivery = serializers.DecimalField(
+        max_digits=14, decimal_places=3, read_only=True, default=Decimal("0")
+    )
 
     class Meta:
         model = Supplier
@@ -82,6 +88,7 @@ class SupplierSerializer(serializers.ModelSerializer):
             "to_pay_on_order",
             "credit_to_receive",
             "stock_to_receive",
+            "stock_pending_delivery",
             "created_at",
             "updated_at",
         )
@@ -239,6 +246,7 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
     unit = serializers.CharField(source="product.unit", read_only=True)
     returned_quantity = serializers.SerializerMethodField()
     returnable_quantity = serializers.SerializerMethodField()
+    remaining_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseItem
@@ -251,6 +259,8 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
             "quantity",
             "unit_price",
             "line_total",
+            "received_quantity",
+            "remaining_quantity",
             "returned_quantity",
             "returnable_quantity",
         )
@@ -275,7 +285,11 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
         return f"{self._returned(obj):.3f}"
 
     def get_returnable_quantity(self, obj):
-        return f"{obj.quantity - self._returned(obj):.3f}"
+        # Only goods that arrived can be sent back.
+        return f"{obj.received_quantity - self._returned(obj):.3f}"
+
+    def get_remaining_quantity(self, obj):
+        return f"{obj.quantity - obj.received_quantity:.3f}"
 
 
 class PurchasePaymentSerializer(serializers.ModelSerializer):
@@ -383,11 +397,64 @@ class PurchaseSerializer(serializers.ModelSerializer):
         return payment_status(obj.net_total, self._paid(obj) + self._credit(obj))
 
 
+class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
+    product = serializers.IntegerField(source="purchase_item.product_id", read_only=True)
+    product_name = serializers.CharField(
+        source="purchase_item.product.name", read_only=True
+    )
+
+    class Meta:
+        model = PurchaseReceiptItem
+        fields = ("id", "purchase_item", "product", "product_name", "quantity")
+
+
+class PurchaseReceiptSerializer(serializers.ModelSerializer):
+    items = PurchaseReceiptItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PurchaseReceipt
+        fields = ("id", "received_on", "notes", "items", "created_at")
+
+
 class PurchaseDetailSerializer(PurchaseSerializer):
     payments = PurchasePaymentSerializer(many=True, read_only=True)
+    receipts = PurchaseReceiptSerializer(many=True, read_only=True)
 
     class Meta(PurchaseSerializer.Meta):
-        fields = PurchaseSerializer.Meta.fields + ("payments",)
+        fields = PurchaseSerializer.Meta.fields + ("payments", "receipts")
+
+
+class PurchaseLineField(serializers.PrimaryKeyRelatedField):
+    """A line of the purchase being received (taken from the context)."""
+
+    def get_queryset(self):
+        purchase = self.context.get("purchase")
+
+        if purchase is None:
+            return PurchaseItem.objects.none()
+
+        return purchase.items.all()
+
+
+class ReceiveItemSerializer(serializers.Serializer):
+    purchase_item = PurchaseLineField()
+    quantity = serializers.DecimalField(
+        max_digits=14, decimal_places=3, min_value=Decimal("0.001")
+    )
+
+
+class ReceivePurchaseSerializer(serializers.Serializer):
+    """All fields are optional: no ``items`` means everything still to come."""
+
+    items = ReceiveItemSerializer(many=True, required=False, allow_empty=False)
+    received_on = serializers.DateField(required=False)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_received_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The date cannot be in the future.")
+
+        return value
 
 
 class ReasonSerializer(serializers.Serializer):

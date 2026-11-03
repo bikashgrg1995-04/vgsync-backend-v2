@@ -272,9 +272,9 @@ def receivables(business, today):
 
 
 def payables(business, today):
-    """What is owed to suppliers on received purchases, aged by purchase date."""
+    """What is owed to suppliers on received (or partly received) purchases, aged by purchase date."""
     purchases = list(
-        Purchase.objects.filter(business=business, status=Purchase.Status.RECEIVED)
+        Purchase.objects.filter(business=business, status__in=Purchase.BILLED)
         .select_related("supplier")
     )
     ids = [purchase.pk for purchase in purchases]

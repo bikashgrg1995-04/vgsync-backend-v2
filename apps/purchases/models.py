@@ -69,8 +69,15 @@ class Purchase(models.Model):
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
+        # Some lines have arrived, some have not. Stock is in for what
+        # arrived; the order is still open and cannot be edited.
+        PARTIAL = "partial", "Partly received"
         RECEIVED = "received", "Received"
         CANCELLED = "cancelled", "Cancelled"
+
+    # Statuses where the supplier's bill is owed: the order has been placed
+    # and at least part of the goods are in.
+    BILLED = ("partial", "received")
 
     business = models.ForeignKey(
         "businesses.Business",
@@ -185,6 +192,10 @@ class PurchaseItem(models.Model):
         related_name="purchase_items",
     )
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # How much of ``quantity`` has arrived so far, over one or more deliveries.
+    received_quantity = models.DecimalField(
+        max_digits=14, decimal_places=3, default=0
+    )
     unit_price = models.DecimalField(**MONEY)
     line_total = models.DecimalField(**MONEY)
 
@@ -196,6 +207,11 @@ class PurchaseItem(models.Model):
                 name="purchase_item_quantity_positive",
             ),
             models.CheckConstraint(
+                condition=Q(received_quantity__gte=0)
+                & Q(received_quantity__lte=models.F("quantity")),
+                name="purchase_item_received_within_quantity",
+            ),
+            models.CheckConstraint(
                 condition=Q(unit_price__gt=0) & Q(line_total__gt=0),
                 name="purchase_item_amounts_positive",
             ),
@@ -203,6 +219,64 @@ class PurchaseItem(models.Model):
 
     def __str__(self):
         return f"{self.purchase} - {self.product_id} x {self.quantity}"
+
+
+class PurchaseReceipt(models.Model):
+    """
+    One delivery of goods against a purchase. A purchase can arrive in
+    several deliveries; each one adds stock once and is never edited.
+    """
+
+    purchase = models.ForeignKey(
+        Purchase,
+        on_delete=models.CASCADE,
+        related_name="receipts",
+    )
+    received_on = models.DateField()
+    notes = models.TextField(blank=True)
+    received_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.purchase} delivery {self.pk}"
+
+
+class PurchaseReceiptItem(models.Model):
+    """The quantity of one purchase line that arrived in a delivery."""
+
+    receipt = models.ForeignKey(
+        PurchaseReceipt,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    purchase_item = models.ForeignKey(
+        PurchaseItem,
+        on_delete=models.PROTECT,
+        related_name="receipt_items",
+    )
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="purchase_receipt_item_quantity_positive",
+            ),
+            models.UniqueConstraint(
+                fields=["receipt", "purchase_item"],
+                name="unique_line_per_receipt",
+            ),
+        ]
 
 
 class PurchasePayment(models.Model):

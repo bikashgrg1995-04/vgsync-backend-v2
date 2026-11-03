@@ -98,7 +98,7 @@ def create_return(*, purchase, user, return_date, reason, notes="", items):
         .get(pk=purchase.pk)
     )
 
-    if purchase.status != Purchase.Status.RECEIVED:
+    if purchase.status not in Purchase.BILLED:
         raise Conflict(
             "Only goods from a received purchase can be returned; this "
             f"purchase is {purchase.status}.",
@@ -145,13 +145,14 @@ def create_return(*, purchase, user, return_date, reason, notes="", items):
     priced = []
 
     for item, quantity, condition in lines:
-        left = item.quantity - returned.get(item.pk, Decimal("0"))
+        # Only goods that actually arrived can go back.
+        left = item.received_quantity - returned.get(item.pk, Decimal("0"))
 
         if quantity > left:
             raise serializers.ValidationError({
                 "items": (
                     f"{item.product.name}: only {left} left to return "
-                    f"(bought {item.quantity})."
+                    f"(received {item.received_quantity})."
                 )
             })
 

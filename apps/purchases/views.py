@@ -34,6 +34,7 @@ from .models import (
     Purchase,
     PurchaseItem,
     PurchasePayment,
+    PurchaseReceipt,
     PurchaseReturn,
     Supplier,
 )
@@ -54,6 +55,7 @@ from .serializers import (
     PurchaseSerializer,
     PurchaseWriteSerializer,
     ReasonSerializer,
+    ReceivePurchaseSerializer,
     ReceiveReplacementSerializer,
     SupplierSerializer,
 )
@@ -135,21 +137,21 @@ class SupplierViewSet(PurchaseBaseViewSet):
     def get_queryset(self):
         active_payment = PurchasePayment.Status.ACTIVE
         active_credit = CreditSettlement.Status.ACTIVE
-        received = Purchase.Status.RECEIVED
+        received = Purchase.BILLED
 
         return Supplier.objects.filter(
             business=self.request.active_business
         ).annotate(
             total_purchased=sum_of(
                 Purchase.objects.filter(
-                    supplier=OuterRef("pk"), status=received
+                    supplier=OuterRef("pk"), status__in=received
                 ),
                 "supplier",
             ),
             _paid=sum_of(
                 PurchasePayment.objects.filter(
                     purchase__supplier=OuterRef("pk"),
-                    purchase__status=received,
+                    purchase__status__in=received,
                     status=active_payment,
                 ),
                 "purchase__supplier",
@@ -159,7 +161,7 @@ class SupplierViewSet(PurchaseBaseViewSet):
                 CreditSettlement.objects.filter(
                     supplier=OuterRef("pk"),
                     kind=CreditSettlement.Kind.ADJUSTMENT,
-                    purchase__status=received,
+                    purchase__status__in=received,
                     status=active_credit,
                 ),
                 "supplier",
@@ -208,6 +210,22 @@ class SupplierViewSet(PurchaseBaseViewSet):
                     )
                     .values("settlement__supplier")
                     .annotate(total=Sum("quantity"))
+                    .values("total")[:1],
+                    output_field=DecimalField(max_digits=14, decimal_places=3),
+                ),
+                Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=3),
+            ),
+            stock_pending_delivery=Coalesce(
+                Subquery(
+                    PurchaseItem.objects.filter(
+                        purchase__supplier=OuterRef("pk"),
+                        purchase__status=Purchase.Status.PARTIAL,
+                    )
+                    .values("purchase__supplier")
+                    .annotate(
+                        total=Sum(F("quantity") - F("received_quantity"))
+                    )
                     .values("total")[:1],
                     output_field=DecimalField(max_digits=14, decimal_places=3),
                 ),
@@ -330,7 +348,16 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         queryset = (
             Purchase.objects.filter(business=self.request.active_business)
             .select_related("supplier")
-            .prefetch_related(Prefetch("items", queryset=items), "payments")
+            .prefetch_related(
+                Prefetch("items", queryset=items),
+                "payments",
+                Prefetch(
+                    "receipts",
+                    queryset=PurchaseReceipt.objects.prefetch_related(
+                        "items__purchase_item__product"
+                    ).order_by("id"),
+                ),
+            )
             .annotate(paid=paid, credit=credit)
             .annotate(
                 settled=ExpressionWrapper(
@@ -389,9 +416,22 @@ class PurchaseViewSet(PurchaseBaseViewSet):
 
     @action(detail=True, methods=["post"])
     def receive(self, request, pk=None):
-        """The goods arrived: add every line to stock and lock the purchase."""
+        """
+        Goods arrived. Send ``items`` (``purchase_item`` and ``quantity``) for
+        a part delivery, or nothing to receive everything still to come.
+        """
+        purchase = self.get_object()
+        serializer = ReceivePurchaseSerializer(
+            data=request.data, context={"purchase": purchase}
+        )
+        serializer.is_valid(raise_exception=True)
+
         purchase = receive_purchase(
-            purchase=self.get_object(), user=request.user
+            purchase=purchase,
+            user=request.user,
+            items=serializer.validated_data.get("items"),
+            received_on=serializer.validated_data.get("received_on"),
+            notes=serializer.validated_data.get("notes", ""),
         )
 
         return self._respond(purchase)

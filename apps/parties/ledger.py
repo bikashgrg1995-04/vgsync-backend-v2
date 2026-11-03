@@ -121,7 +121,10 @@ def supplier_rows(supplier):
     for purchase in purchases.Purchase.objects.filter(supplier=supplier).exclude(
         status=purchases.Purchase.Status.CANCELLED
     ):
-        state = "ordered" if purchase.status == purchases.Purchase.Status.DRAFT else "received"
+        state = {
+            purchases.Purchase.Status.DRAFT: "ordered",
+            purchases.Purchase.Status.PARTIAL: "partly received",
+        }.get(purchase.status, "received")
         rows.append(_row(
             purchase.purchase_date, CHARGE, purchase.pk, "purchase",
             purchase.bill_no or purchase.purchase_no,

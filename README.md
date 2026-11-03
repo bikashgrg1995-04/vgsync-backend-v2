@@ -372,10 +372,14 @@ Amounts are rounded to the paisa. The discount cannot exceed the subtotal.
 | --- | --- | --- |
 | `GET`, `POST` | `/purchases/` | List (filters: `status`, `supplier`, `payment_status`, `purchase_date__gte`, `purchase_date__lte`, `search`) or create a draft |
 | `GET`, `PATCH` | `/purchases/{id}/` | View, or edit a draft. Sending `items` replaces all lines |
-| `POST` | `/purchases/{id}/receive/` | Goods arrived: add the lines to stock |
+| `POST` | `/purchases/{id}/receive/` | Goods arrived: add them to stock, all at once or in parts (see below) |
 | `POST` | `/purchases/{id}/cancel/` | Cancel a draft, with a `reason` |
 | `GET`, `POST` | `/purchases/payments/` | List or record a supplier payment (full or part, also before the goods arrive) |
 | `POST` | `/purchases/payments/{id}/void/` | Void a payment, with a `reason` |
+
+**Receiving in parts.** `POST /purchases/{id}/receive/` with no body receives everything still to come. For a part delivery send `{"items": [{"purchase_item": 12, "quantity": "4"}], "received_on": "2026-11-03", "notes": "First truck"}`. Each call is one delivery, kept under `receipts` on the purchase, and adds stock once. While some quantity is still to come the purchase is `partial`: it can no longer be edited or cancelled, but it can be paid and returned. When every line has fully arrived it becomes `received`. Each line shows `received_quantity` and `remaining_quantity`. A delivery that goes over what is still to come is refused as a whole (`400`).
+
+A `partial` purchase is already billed, so it counts in the supplier's `outstanding` and in the payables report. Quantity not yet delivered shows as `stock_pending_delivery` on the supplier. Only goods that have arrived can be returned (`returnable_quantity`).
 
 Create a purchase:
 

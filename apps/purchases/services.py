@@ -23,6 +23,8 @@ from .models import (
     Purchase,
     PurchaseItem,
     PurchasePayment,
+    PurchaseReceipt,
+    PurchaseReceiptItem,
     ZERO,
 )
 
@@ -256,37 +258,111 @@ def cancel_purchase(*, purchase, user, reason):
 # ---------------------------------------------------------------------------
 
 @transaction.atomic
-def receive_purchase(*, purchase, user):
+def receive_purchase(*, purchase, user, items=None, received_on=None, notes=""):
     """
-    The goods have arrived: add every line to the business's stock and lock
-    the purchase. Stock moves exactly once; a second call is refused, and if
-    any line cannot be received nothing is changed.
+    Goods have arrived: add them to the business's stock.
+
+    ``items`` is ``[{"purchase_item", "quantity"}]`` for a part delivery; with
+    no ``items`` everything still to come is received. Each call is one
+    delivery (a ``PurchaseReceipt``). Once every line is fully received the
+    purchase is ``received``; until then it is ``partial``. If any line
+    cannot be received nothing is changed.
     """
     purchase = Purchase.objects.select_for_update().select_related(
         "business", "supplier"
     ).get(pk=purchase.pk)
 
-    if purchase.status != Purchase.Status.DRAFT:
+    if purchase.status not in (Purchase.Status.DRAFT, Purchase.Status.PARTIAL):
         raise Conflict(
-            f"Only a draft purchase can be received; this one is "
-            f"{purchase.status}.",
+            f"Only a draft or partly received purchase can be received; "
+            f"this one is {purchase.status}.",
             code="invalid_status",
         )
 
-    for item in purchase.items.select_related("product"):
+    lines = {
+        item.pk: item
+        for item in purchase.items.select_for_update().select_related("product")
+    }
+
+    if items is None:
+        wanted = [
+            (item, item.quantity - item.received_quantity)
+            for item in lines.values()
+            if item.quantity > item.received_quantity
+        ]
+    else:
+        wanted = []
+        seen = set()
+
+        for entry in items:
+            item = lines.get(entry["purchase_item"].pk)
+
+            if item is None:
+                raise serializers.ValidationError(
+                    {"items": "A line does not belong to this purchase."}
+                )
+
+            if item.pk in seen:
+                raise serializers.ValidationError(
+                    {"items": "A line is listed twice. Combine the quantities."}
+                )
+
+            seen.add(item.pk)
+
+            left = item.quantity - item.received_quantity
+
+            if entry["quantity"] > left:
+                raise serializers.ValidationError({
+                    "items": (
+                        f"{item.product.name}: only {left} still to come "
+                        f"(ordered {item.quantity})."
+                    )
+                })
+
+            wanted.append((item, entry["quantity"]))
+
+    if not wanted:
+        raise Conflict(
+            "Nothing is left to receive on this purchase.",
+            code="nothing_to_receive",
+        )
+
+    receipt = PurchaseReceipt.objects.create(
+        purchase=purchase,
+        received_on=received_on or timezone.localdate(),
+        notes=notes,
+        received_by=user,
+    )
+
+    for item, quantity in wanted:
         create_stock_movement(
             user=user,
             business=purchase.business,
             product=item.product,
             movement_type=StockMovement.MovementType.PURCHASE_RECEIPT,
-            quantity=item.quantity,
+            quantity=quantity,
             reference=purchase.purchase_no,
             notes=f"Purchase from {purchase.supplier.name}",
         )
 
-    purchase.status = Purchase.Status.RECEIVED
-    purchase.received_by = user
-    purchase.received_at = timezone.now()
+        PurchaseReceiptItem.objects.create(
+            receipt=receipt, purchase_item=item, quantity=quantity
+        )
+
+        item.received_quantity += quantity
+        item.save(update_fields=["received_quantity"])
+
+    complete = all(
+        item.received_quantity >= item.quantity for item in lines.values()
+    )
+
+    if complete:
+        purchase.status = Purchase.Status.RECEIVED
+        purchase.received_by = user
+        purchase.received_at = timezone.now()
+    else:
+        purchase.status = Purchase.Status.PARTIAL
+
     purchase.save()
 
     return purchase
