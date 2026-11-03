@@ -2,11 +2,11 @@ from decimal import Decimal
 
 from django.db.models import Count, Sum
 from django.utils import timezone
-from django.utils.dateparse import parse_date
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from apps.common.dates import parse_query_date
 from apps.common.exceptions import Conflict
 from apps.common.permissions import IsOwner
 
@@ -131,10 +131,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             status=CreditSettlement.Status.ACTIVE,
         )
 
-        if day := parse_date(query.get("expense_date__gte") or ""):
+        if day := parse_query_date(query.get("expense_date__gte")):
             refunds = refunds.filter(settled_on__gte=day)
 
-        if day := parse_date(query.get("expense_date__lte") or ""):
+        if day := parse_query_date(query.get("expense_date__lte")):
             refunds = refunds.filter(settled_on__lte=day)
 
         return refunds.aggregate(total=Sum("amount"))["total"] or Decimal("0")
@@ -253,10 +253,10 @@ class IncomeViewSet(viewsets.ModelViewSet):
             status=SaleCreditSettlement.Status.ACTIVE,
         )
 
-        if day := parse_date(query.get("income_date__gte") or ""):
+        if day := parse_query_date(query.get("income_date__gte")):
             refunds = refunds.filter(settled_on__gte=day)
 
-        if day := parse_date(query.get("income_date__lte") or ""):
+        if day := parse_query_date(query.get("income_date__lte")):
             refunds = refunds.filter(settled_on__lte=day)
 
         return refunds.aggregate(total=Sum("amount"))["total"] or Decimal("0")

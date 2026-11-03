@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "apps.purchases.apps.PurchasesConfig",
     "apps.sales.apps.SalesConfig",
     "apps.parties.apps.PartiesConfig",
+    "apps.reports.apps.ReportsConfig",
     "apps.finance.apps.FinanceConfig",
 ]
 

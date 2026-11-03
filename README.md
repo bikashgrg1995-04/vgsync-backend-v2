@@ -589,6 +589,21 @@ Customers and suppliers are parties of their own business. Every purchase, purch
 
 Statement filters: `date_from`, `date_to` (`YYYY-MM-DD`, bad dates return 400) and `type`. The response gives `opening_balance`, `total_debit`, `total_credit`, `closing_balance` and a paginated `results` list with a running balance on each row. A positive balance means the customer owes you (customers) or you owe the supplier (suppliers). Voided payments and cancelled documents are left out; adjustments do not move the balance.
 
+## Reports API (owner only)
+
+Read-only reports for the active business. Money comes back as strings.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/reports/profit-loss/` | Profit and loss on a cash basis. Filters: `date_from`, `date_to` (bad or reversed dates return 400) |
+| `GET` | `/reports/receivables/` | What customers owe, aged by sale date, per customer |
+| `GET` | `/reports/payables/` | What is owed to suppliers on received purchases, aged by purchase date |
+| `GET` | `/reports/stock-value/` | Stock on hand at purchase price, good and damaged apart |
+
+- **Profit and loss:** `income` (less `sale_refunds`) against `expenses` (less `purchase_refunds`), with `profit`, a split by category and a `by_month` list. Voided records are left out. A return that is not refunded in cash moves nothing.
+- **Ageing buckets:** `current` (0-30 days), `31_60`, `61_90`, `over_90`. The total matches the sum of customer `credit_to_receive` (without EMI) or supplier `outstanding`. EMI sales are shown separately as `emi_outstanding`, because their instalments fall due over months.
+- **Stock value:** `good_value`, `damaged_value`, `total_value` and per product lines, biggest first. Products with no purchase price are counted in `products_without_price` and valued at zero.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.
