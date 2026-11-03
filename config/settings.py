@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "apps.payroll.apps.PayrollConfig",
     "apps.purchases.apps.PurchasesConfig",
     "apps.sales.apps.SalesConfig",
+    "apps.parties.apps.PartiesConfig",
     "apps.finance.apps.FinanceConfig",
 ]
 

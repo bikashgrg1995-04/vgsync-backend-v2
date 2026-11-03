@@ -11,7 +11,7 @@ from apps.inventory.services.stock import create_stock_movement
 from apps.sales.models import Customer, Sale
 
 BASE = "/api/v1/sales/"
-CUSTOMERS = "/api/v1/sales/customers/"
+CUSTOMERS = "/api/v1/customers/"
 PAYMENTS = "/api/v1/sales/payments/"
 
 

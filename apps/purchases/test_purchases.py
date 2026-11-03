@@ -11,7 +11,7 @@ from apps.inventory.models import Product, StockBalance, StockMovement
 from apps.purchases.models import Purchase, PurchaseItem, PurchasePayment, Supplier
 
 BASE = "/api/v1/purchases/"
-SUPPLIERS = "/api/v1/purchases/suppliers/"
+SUPPLIERS = "/api/v1/suppliers/"
 PAYMENTS = "/api/v1/purchases/payments/"
 EXPENSES = "/api/v1/finance/expenses/"
 

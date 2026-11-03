@@ -376,8 +376,6 @@ Amounts are rounded to the paisa. The discount cannot exceed the subtotal.
 | `POST` | `/purchases/{id}/cancel/` | Cancel a draft, with a `reason` |
 | `GET`, `POST` | `/purchases/payments/` | List or record a supplier payment (full or part, also before the goods arrive) |
 | `POST` | `/purchases/payments/{id}/void/` | Void a payment, with a `reason` |
-| `GET`, `POST` | `/purchases/suppliers/` | List or add suppliers |
-| `GET`, `PATCH`, `DELETE` | `/purchases/suppliers/{id}/` | View, edit or deactivate a supplier |
 
 Create a purchase:
 
@@ -465,8 +463,6 @@ A draft can be edited freely and has no effect on stock. `confirm` takes every l
 | `POST` | `/sales/{id}/cancel/` | Cancel a draft, with a `reason` |
 | `GET`, `POST` | `/sales/payments/` | List or record a customer payment (full or part, also on a draft as an advance) |
 | `POST` | `/sales/payments/{id}/void/` | Void a payment, with a `reason` |
-| `GET`, `POST` | `/sales/customers/` | List or add customers |
-| `GET`, `PATCH`, `DELETE` | `/sales/customers/{id}/` | View, edit or deactivate a customer |
 
 Create a sale:
 
@@ -577,6 +573,21 @@ Follow-ups are created by the system when a sale is confirmed. They are listed a
 ### Income
 
 Every customer payment is added to income automatically in the category of its sale (`stock_sale`, `bike_sale`, `maintenance`), on the day it is received; money not yet received stays as credit to receive and is not income. Voiding the payment voids its income. Cash refunded to customers for returned goods is not entered as negative income; it is subtracted in the summary instead (see below).
+
+## Customers and suppliers API
+
+Customers and suppliers are parties of their own business. Every purchase, purchase return, supplier payment and credit points at a supplier; every sale, sale return, customer payment and credit points at a customer. Both can be filtered by party (`?supplier=` or `?customer=`).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `POST` | `/customers/` | List or add customers (profile includes what they owe and the credit you owe them) |
+| `GET`, `PATCH`, `DELETE` | `/customers/{id}/` | View, edit or deactivate a customer |
+| `GET` | `/customers/{id}/statement/` | Full history: sales, payments, returns, credit use and refunds |
+| `GET`, `POST` | `/suppliers/` | List or add suppliers (profile includes outstanding, advance, credit to pay and credit to receive) |
+| `GET`, `PATCH`, `DELETE` | `/suppliers/{id}/` | View, edit or deactivate a supplier |
+| `GET` | `/suppliers/{id}/statement/` | Full history: purchases, payments, returns, credits and replacements |
+
+Statement filters: `date_from`, `date_to` (`YYYY-MM-DD`, bad dates return 400) and `type`. The response gives `opening_balance`, `total_debit`, `total_credit`, `closing_balance` and a paginated `results` list with a running balance on each row. A positive balance means the customer owes you (customers) or you owe the supplier (suppliers). Voided payments and cancelled documents are left out; adjustments do not move the balance.
 
 ## Expenses API (owner only)
 

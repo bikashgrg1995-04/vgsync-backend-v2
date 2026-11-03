@@ -2,7 +2,6 @@ from rest_framework.routers import SimpleRouter
 
 from .views import (
     BikeUnitViewSet,
-    CustomerViewSet,
     FollowupViewSet,
     SaleCreditViewSet,
     SalePaymentViewSet,
@@ -13,8 +12,8 @@ from .views import (
 app_name = "sales"
 
 router = SimpleRouter()
-# Registered before the empty prefix so "customers/" is not read as a sale id.
-router.register("customers", CustomerViewSet, basename="customers")
+# Registered before the empty prefix so "payments/" is not read as a sale id.
+# Customers have their own section: see ``apps.parties``.
 router.register("payments", SalePaymentViewSet, basename="payments")
 router.register("bikes", BikeUnitViewSet, basename="bikes")
 router.register("followups", FollowupViewSet, basename="followups")
