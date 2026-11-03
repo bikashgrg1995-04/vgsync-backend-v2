@@ -237,15 +237,22 @@ class StockReturnTests(ReturnTestCase):
             self.assertEqual(response.status_code, 409, sale["status"])
             self.assertEqual(response.data["code"], "invalid_status")
 
-    def test_goods_can_go_back_into_damaged_stock(self):
+    def test_returned_goods_always_go_into_good_stock(self):
         sale = self.paid_sale()
 
-        response = self.send_back(sale, "2", line={"stock_condition": "damaged"})
+        data = self.returned(sale, "2")
 
-        self.assertEqual(response.status_code, 201, response.data)
+        self.assertNotIn("stock_condition", data["items"][0])
         balance = StockBalance.objects.get(product=self.oil, business=self.ho)
-        self.assertEqual(balance.damaged_quantity, dec("2"))
-        self.assertEqual(balance.quantity, dec("40"))
+        self.assertEqual(balance.quantity, dec("42"))
+        self.assertEqual(balance.damaged_quantity, dec("0"))
+        # A stock condition in the request is not accepted as a choice.
+        response = self.send_back(sale, "1", line={"stock_condition": "damaged"})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            StockBalance.objects.get(product=self.oil, business=self.ho).damaged_quantity,
+            dec("0"),
+        )
 
     def test_input_rules(self):
         sale = self.paid_sale()
@@ -260,9 +267,6 @@ class StockReturnTests(ReturnTestCase):
 
         self.assertEqual(self.send_back(sale, "0").status_code, 400)
         self.assertEqual(self.send_back(sale, "-1").status_code, 400)
-        self.assertEqual(
-            self.send_back(sale, "1", line={"stock_condition": "scrap"}).status_code, 400
-        )
         self.assertEqual(self.stock(), dec("40"))
 
     def test_numbers_run_on_within_a_business(self):
@@ -834,121 +838,33 @@ class BikeReturnTests(ReturnTestCase):
 
         return self.detail(sale["id"])
 
-    def test_a_bike_goes_back_into_stock_and_can_be_sold_again(self):
-        sale = self.bike_paid()
-        unit_id = sale["items"][0]["bike_unit"]
-        self.assertEqual(self.stock_of(self.model), dec("4"))
-
-        data = self.returned(sale, "1")
-
-        self.assertEqual(data["credit_amount"], "100000.00")
-        self.assertEqual(data["items"][0]["chassis_no"], "CH-001")
-        self.assertEqual(BikeUnit.objects.get(pk=unit_id).status, "in_stock")
-        self.assertEqual(self.stock_of(self.model), dec("5"))
-
-        again = self.client.post(
-            BASE,
-            {"sale_type": "bike", "customer": self.customer.pk,
-             "items": [{"bike_unit": unit_id}]},
-            format="json",
-        )
-        self.assertEqual(again.status_code, 201, again.data)
-
-    def test_a_bike_is_returned_as_a_whole_into_good_stock(self):
+    def test_a_bike_cannot_be_returned(self):
         sale = self.bike_paid()
 
-        partial = self.send_back(sale, "0.5")
-        damaged = self.send_back(sale, "1", line={"stock_condition": "damaged"})
+        response = self.send_back(sale, "1")
 
-        self.assertEqual(partial.status_code, 400)
-        self.assertEqual(damaged.status_code, 400)
-        self.assertEqual(BikeUnit.objects.get().status, "sold")
-
-    def test_a_bike_cannot_be_returned_twice(self):
-        sale = self.bike_paid()
-        self.returned(sale, "1")
-
-        self.assertEqual(self.send_back(sale, "1").status_code, 400)
-
-    def test_voiding_a_bike_return_marks_it_sold_again(self):
-        sale = self.bike_paid()
-        ret = self.returned(sale, "1")
-
-        response = self.void_return(ret)
-
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("bike cannot be returned", str(response.data["items"]))
+        self.assertFalse(SaleReturn.objects.exists())
         self.assertEqual(BikeUnit.objects.get().status, "sold")
         self.assertEqual(self.stock_of(self.model), dec("4"))
 
-    def test_a_bike_sold_to_someone_else_cannot_be_taken_back(self):
+    def test_a_bike_line_shows_nothing_to_return(self):
         sale = self.bike_paid()
-        ret = self.returned(sale, "1")
-        unit_id = sale["items"][0]["bike_unit"]
-        new = self.client.post(
-            BASE,
-            {"sale_type": "bike", "customer": self.customer.pk,
-             "items": [{"bike_unit": unit_id}]},
-            format="json",
-        ).json()
-        self.pay(new["id"], "100000.00")
-        self.confirm(new["id"])
 
-        response = self.void_return(ret)
+        self.assertEqual(sale["items"][0]["returnable_quantity"], "0.000")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["code"], "bike_unavailable")
-        self.assertEqual(SaleReturn.objects.get().status, "active")
-
-    def emi_sale(self):
+    def test_an_emi_bike_cannot_be_returned_either(self):
         sale = self.made_bike(**self.emi_terms())
         self.pay(sale["id"], "20000.00")
         self.confirm(sale["id"])
-        self.pay(sale["id"], "9000.00")
 
-        return self.detail(sale["id"])
+        response = self.send_back(sale, "1")
 
-    def test_returning_an_emi_bike_ends_the_sale_and_everything_paid_becomes_credit(self):
-        sale = self.emi_sale()
-        self.assertEqual(sale["amount_due"], "110000.00")
-
-        data = self.returned(sale, "1")
-
-        # 110000 - 29000 still to come is dropped; 29000 received is owed back.
-        self.assertEqual(data["applied_amount"], "81000.00")
-        self.assertEqual(data["credit_amount"], "29000.00")
-        detail = self.detail(sale["id"])
-        self.assertEqual(detail["remaining_amount"], "0.00")
-        self.assertEqual(detail["payment_status"], "paid")
-        states = [r["status"] for r in detail["installments"]]
-        self.assertEqual(states[0], "paid")
-        self.assertEqual(set(states[1:]), {"cancelled"})
-        figures = self.figures()
-        self.assertEqual(figures["credit_to_pay"], "29000.00")
-        self.assertEqual(figures["credit_to_receive"], "0.00")
-
-    def test_the_follow_ups_of_an_ended_emi_sale_close_and_open_again_with_the_void(self):
-        sale = self.emi_sale()
-        self.assertEqual(len(self.followups(kind="emi_due", status="pending")), 9)
-
-        ret = self.returned(sale, "1")
-        self.assertEqual(len(self.followups(kind="emi_due", status="pending")), 0)
-
-        self.void_return(ret)
-
-        self.assertEqual(len(self.followups(kind="emi_due", status="pending")), 9)
-        detail = self.detail(sale["id"])
-        self.assertEqual(detail["remaining_amount"], "81000.00")
-        self.assertEqual(detail["installments"][0]["status"], "paid")
-        self.assertNotIn("cancelled", {r["status"] for r in detail["installments"]})
-        self.assertEqual(self.figures()["credit_to_pay"], "0.00")
-
-    def test_the_credit_of_an_ended_emi_sale_can_be_refunded(self):
-        sale = self.emi_sale()
-        self.returned(sale, "1")
-
-        self.assertEqual(self.refund("29000.00", method="bank").status_code, 201)
-        self.assertEqual(self.figures()["credit_to_pay"], "0.00")
-        self.assertEqual(self.refund("0.01", method="bank").status_code, 400)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            len(self.followups(kind="emi_due", status="pending")), 10
+        )
 
 
 class ReturnAccessTests(ReturnTestCase):

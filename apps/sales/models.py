@@ -568,19 +568,16 @@ class Followup(models.Model):
 
 class SaleReturn(models.Model):
     """
-    Goods a customer brought back from a confirmed sale: stock goods, a
-    bike, or the parts of a maintenance sale (a service charge is not
-    returned). Returning puts the goods back into stock (a bike unit goes
-    back in stock) and is worth the value of what came back, with its share
+    Goods a customer brought back from a confirmed sale: stock goods or the
+    parts of a maintenance sale (a service charge and a bike are not
+    returned). Returning puts the goods back into good stock and is worth
+    the value of what came back, with its share
     of the discount and VAT (``goods_value``). That value first reduces what
     the customer still owes on the same sale (``applied_amount``); whatever
     is left is a **credit to pay** to the customer (``credit_amount``),
     kept apart from what the customer owes. It is used up by a refund, by
     applying it to another sale, or by giving other goods (see
     ``SaleCreditSettlement``).
-
-    Returning the bike of an EMI sale ends the sale: the instalments still
-    to come are cancelled, and everything the customer paid becomes credit.
     """
 
     class Status(models.TextChoices):
@@ -681,7 +678,7 @@ class SaleReturnItem(models.Model):
         related_name="sale_return_items",
     )
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
-    # Which stock the goods go back into.
+    # Returned goods always go back into good stock.
     stock_condition = models.CharField(max_length=10, default="good")
     # The value of these goods (with their share of discount and VAT).
     credit_amount = models.DecimalField(**MONEY, default=ZERO)

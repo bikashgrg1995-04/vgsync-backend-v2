@@ -290,7 +290,8 @@ class SaleItemSerializer(serializers.ModelSerializer):
         return f"{self._returned(obj):.3f}"
 
     def get_returnable_quantity(self, obj):
-        if obj.product_id is None:
+        # A service charge and a bike cannot be returned.
+        if obj.product_id is None or obj.bike_unit_id:
             return "0.000"
 
         return f"{obj.quantity - self._returned(obj):.3f}"
@@ -663,11 +664,6 @@ class SaleItemField(serializers.PrimaryKeyRelatedField):
 class SaleReturnItemInputSerializer(serializers.Serializer):
     sale_item = SaleItemField()
     quantity = serializers.DecimalField(**QUANTITY)
-    stock_condition = serializers.ChoiceField(
-        choices=[("good", "Good"), ("damaged", "Damaged")],
-        default="good",
-        help_text="Which stock the goods go back into.",
-    )
 
 
 class SaleReturnWriteSerializer(serializers.Serializer):
@@ -707,9 +703,6 @@ class SaleReturnItemSerializer(serializers.ModelSerializer):
     unit_price = serializers.DecimalField(
         source="sale_item.unit_price", max_digits=12, decimal_places=2, read_only=True
     )
-    chassis_no = serializers.CharField(
-        source="sale_item.bike_unit.chassis_no", default=None, read_only=True
-    )
 
     class Meta:
         model = SaleReturnItem
@@ -719,10 +712,8 @@ class SaleReturnItemSerializer(serializers.ModelSerializer):
             "product",
             "stock_no",
             "product_name",
-            "chassis_no",
             "quantity",
             "unit_price",
-            "stock_condition",
             "credit_amount",
         )
 
@@ -766,8 +757,7 @@ class SaleReturnSerializer(serializers.ModelSerializer):
         return obj.sale.walk_in_name or "Walk-in"
 
     def get_goods_value(self, obj):
-        """The value of what came back; ``applied_amount`` + ``credit_amount``
-        except on an EMI sale, which ends."""
+        """The value of what came back: ``applied_amount`` + ``credit_amount``."""
         return f"{sum((i.credit_amount for i in obj.items.all()), Decimal('0')):.2f}"
 
 

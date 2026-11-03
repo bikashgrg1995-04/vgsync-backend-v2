@@ -601,8 +601,8 @@ class FollowupViewSet(SalesBaseViewSet):
 
 class SaleReturnViewSet(SalesBaseViewSet):
     """
-    Goods customers brought back from confirmed sales: stock goods, a bike,
-    or the parts of a maintenance sale. A return puts the goods back into
+    Goods customers brought back from confirmed sales: stock goods or the
+    parts of a maintenance sale (not a bike, not a service charge). A return puts the goods back into
     stock; its value first takes off what the customer owes on that sale and
     the rest is **credit to pay** to the customer. Never edited or deleted;
     ``void`` undoes it. Filters: ``sale``, ``customer``, ``status``,
@@ -630,7 +630,7 @@ class SaleReturnViewSet(SalesBaseViewSet):
                 Prefetch(
                     "items",
                     queryset=SaleReturnItem.objects.select_related(
-                        "product", "sale_item__bike_unit"
+                        "product", "sale_item"
                     ),
                 )
             )

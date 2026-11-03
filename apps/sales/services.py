@@ -286,13 +286,6 @@ def settled_total(sale):
     )
 
 
-def emi_ended_by_return(sale):
-    """The bike of an EMI sale came back: no more instalments are due."""
-    return (
-        sale.payment_mode == Sale.PaymentMode.EMI
-        and sale.returns.filter(status="active").exists()
-    )
-
 
 # ---------------------------------------------------------------------------
 # Create, edit, cancel
@@ -601,7 +594,6 @@ def installment_rows(sale):
     """
     pool = max(ZERO, paid_total(sale) - sale.down_payment)
     today = timezone.localdate()
-    ended = emi_ended_by_return(sale)
     rows = []
 
     for installment in sale.installments.all():
@@ -610,8 +602,6 @@ def installment_rows(sale):
 
         if paid >= installment.amount:
             state = "paid"
-        elif ended:
-            state = "cancelled"
         elif installment.due_date < today:
             state = "overdue"
         else:
@@ -636,8 +626,7 @@ def sync_followups(sale):
     person marked done or skipped are left alone.
     """
     covered = {
-        row["id"]: row["status"] in ("paid", "cancelled")
-        for row in installment_rows(sale)
+        row["id"]: row["status"] == "paid" for row in installment_rows(sale)
     }
     remaining = sale.amount_due - settled_total(sale)
     today = timezone.localdate()

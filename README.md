@@ -17,7 +17,7 @@ This repository contains the **foundation layer** (tenancy, authentication, perm
 | Expenses, with salary payments added automatically (owner only) | API |
 | Inventory | Foundation in progress (`apps/inventory`) |
 | Purchases: suppliers, purchases with server-calculated totals, receiving stock, supplier payments, purchase returns and supplier credit (needs the `purchases` permission) | API |
-| Sales: stock, bike (full payment or EMI) and maintenance sales, customers, confirming (stock out, invoice number), customer payments, credit to receive, sale returns and customer credit to pay, follow-ups and income (needs the `sales` permission) | API |
+| Sales: stock, bike (full payment or EMI) and maintenance sales, customers, confirming (stock out, invoice number), customer payments, credit to receive, sale returns (stock and parts) and customer credit to pay, follow-ups and income (needs the `sales` permission) | API |
 | Company / business management APIs | Not yet implemented |
 | Orders, dashboard, reminders, analytics, ledger and reports | Not yet implemented (the permission system already defines most of these modules) |
 
@@ -516,13 +516,13 @@ credit  -->  refund       cash goes back to the customer             (credit dow
 | `POST` | `/sales/credits/{id}/deliver/` | The replacement goods were handed over: take them out of stock (once; optional `delivered_on`) |
 | `POST` | `/sales/credits/{id}/void/` | Undo a refund, adjustment or a replacement not yet delivered, with a `reason` |
 
-Return: `{"sale": 5, "reason": "Wrong part", "items": [{"sale_item": 11, "quantity": "4", "stock_condition": "good"}]}`. `stock_condition` is `good` (default) or `damaged`, the stock the goods go back into. Each sale line shows `returned_quantity` and `returnable_quantity`; a sale shows `returned_amount` (what returns took off what is owed) and `credit_applied` (credit set against it).
+Return: `{"sale": 5, "reason": "Wrong part", "items": [{"sale_item": 11, "quantity": "4"}]}`. Returned goods always go back into good stock. Each sale line shows `returned_quantity` and `returnable_quantity`; a sale shows `returned_amount` (what returns took off what is owed) and `credit_applied` (credit set against it).
 
 What can be returned:
 
 - **Stock sale:** any line, in parts, until nothing is left.
 - **Maintenance:** the parts only. A service charge cannot be returned.
-- **Bike:** the bike is returned as a whole, into good stock; its unit is in stock again and can be sold again. Returning the bike of an **EMI** sale ends the sale: the instalments still to come are cancelled (`cancelled`), their follow-ups close, and everything the customer paid becomes credit to pay.
+- **Bike sale:** nothing. A bike (full payment or EMI) cannot be returned; its line shows `returnable_quantity: "0.000"`.
 
 Use credit with `POST /sales/credits/`:
 
@@ -559,7 +559,7 @@ down_payment + emi_months x emi_amount - net_total  =  finance_charge   (cannot 
 amount due = net_total + finance_charge
 ```
 
-The down payment must be received before the sale can be confirmed (`409`, `down_payment_due`) and an EMI needs a customer. Confirming creates the monthly instalments; `GET /sales/{id}/` shows them as `installments`, each with `paid_amount` and a status (`paid`, `partial`, `upcoming`, `overdue`, or `cancelled` once the bike is returned). Money received after the down payment covers the instalments in order, so the schedule is always worked out from the payments and never typed in. Payments cannot exceed the amount due, and the down payment of a confirmed EMI sale cannot be voided.
+The down payment must be received before the sale can be confirmed (`409`, `down_payment_due`) and an EMI needs a customer. Confirming creates the monthly instalments; `GET /sales/{id}/` shows them as `installments`, each with `paid_amount` and a status (`paid`, `partial`, `upcoming`, `overdue`). Money received after the down payment covers the instalments in order, so the schedule is always worked out from the payments and never typed in. Payments cannot exceed the amount due, and the down payment of a confirmed EMI sale cannot be voided.
 
 ### Follow-ups
 

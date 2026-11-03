@@ -3,19 +3,17 @@ Goods coming back from customers, and the credit that creates.
 
 Rules
 -----
-* Only goods from a **confirmed** sale can be returned: stock goods, a bike
-  (one unit, back into stock) or the parts of a maintenance sale. A service
-  charge cannot be returned. Every line must belong to that sale, none can
-  be listed twice, and nothing beyond what has not been returned yet.
-* A return puts the goods back into stock (a ``sale_return`` movement per
-  line, into good or damaged stock) and is worth their value with their
-  share of the discount and VAT (``goods_value``).
+* Only goods from a **confirmed** sale can be returned: stock goods or the
+  parts of a maintenance sale. A service charge and a bike cannot be
+  returned. Every line must belong to that sale, none can be listed twice,
+  and nothing beyond what has not been returned yet.
+* A return puts the goods back into good stock (a ``sale_return`` movement
+  per line) and is worth their value with their share of the discount and
+  VAT (``goods_value``).
 * That value first takes off what the customer still owes on the same sale
   (``applied_amount``). Whatever is left is **credit to pay**
   (``credit_amount``): money the business owes the customer, kept apart
   from what the customer owes. A walk-in customer is refunded straight away.
-* The bike of an EMI sale ends the sale: instalments still to come are
-  cancelled and everything the customer paid becomes credit.
 * Credit is used up by a ``refund`` (cash goes back to the customer), an
   ``adjustment`` (set against what the customer owes on another sale) or a
   ``replacement`` (other goods are given instead: the credit is used up and
@@ -37,7 +35,6 @@ from apps.inventory.services.stock import create_stock_movement
 from apps.purchases.services import HUNDRED, money, next_number
 
 from .models import (
-    BikeUnit,
     Customer,
     Sale,
     SaleCreditSettlement,
@@ -96,7 +93,7 @@ def line_credit(sale, item, quantity):
 def create_return(*, sale, user, return_date, reason, notes="", items,
                   refund_method="", reference=""):
     """
-    ``items``: ``[{"sale_item", "quantity", "stock_condition"}]``.
+    ``items``: ``[{"sale_item", "quantity"}]``.
     Everything happens together: if anything cannot be done, nothing is
     returned.
     """
@@ -154,24 +151,18 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
                 {"items": f"{item.description}: a service charge cannot be returned."}
             )
 
+        if item.bike_unit_id:
+            raise serializers.ValidationError(
+                {"items": "A bike cannot be returned."}
+            )
+
         if item.pk in seen:
             raise serializers.ValidationError(
                 {"items": "A line is listed twice. Combine the quantities."}
             )
 
-        if item.bike_unit_id:
-            if entry["quantity"] != item.quantity:
-                raise serializers.ValidationError(
-                    {"items": "A bike is returned as a whole."}
-                )
-
-            if entry["stock_condition"] != "good":
-                raise serializers.ValidationError(
-                    {"items": "A returned bike goes back into good stock."}
-                )
-
         seen.add(item.pk)
-        lines.append((item, entry["quantity"], entry["stock_condition"]))
+        lines.append((item, entry["quantity"]))
 
     returned = {
         row["sale_item"]: row["total"]
@@ -194,7 +185,7 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
 
     priced = []
 
-    for item, quantity, condition in lines:
+    for item, quantity in lines:
         left = item.quantity - returned.get(item.pk, Decimal("0"))
 
         if quantity > left:
@@ -213,20 +204,14 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
         )
         credited += value
 
-        priced.append((item, quantity, condition, value))
+        priced.append((item, quantity, value))
 
-    goods_value = sum((p[3] for p in priced), ZERO)
+    goods_value = sum((p[2] for p in priced), ZERO)
     settled = settled_total(sale)
     unpaid = max(sale.amount_due - settled, ZERO)
 
-    if sale.payment_mode == Sale.PaymentMode.EMI:
-        # The sale ends: what was still to come is dropped, everything
-        # received becomes credit.
-        applied = unpaid
-        credit = settled
-    else:
-        applied = min(goods_value, unpaid)
-        credit = goods_value - applied
+    applied = min(goods_value, unpaid)
+    credit = goods_value - applied
 
     ret = SaleReturn.objects.create(
         business=sale.business,
@@ -241,27 +226,14 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
         created_by=user,
     )
 
-    units = {
-        unit.pk: unit
-        for unit in BikeUnit.objects.select_for_update().filter(
-            pk__in=[p[0].bike_unit_id for p in priced if p[0].bike_unit_id]
-        )
-    }
-
-    for item, quantity, condition, value in priced:
+    for item, quantity, value in priced:
         SaleReturnItem.objects.create(
             sale_return=ret,
             sale_item=item,
             product=item.product,
             quantity=quantity,
-            stock_condition=condition,
             credit_amount=value,
         )
-
-        if item.bike_unit_id:
-            unit = units[item.bike_unit_id]
-            unit.status = BikeUnit.Status.IN_STOCK
-            unit.save(update_fields=["status", "updated_at"])
 
         create_stock_movement(
             user=user,
@@ -269,7 +241,6 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
             product=item.product,
             movement_type=StockMovement.MovementType.SALE_RETURN,
             quantity=quantity,
-            stock_condition=condition,
             reference=ret.return_no,
             notes=f"Returned on {sale.invoice_no} ({sale.sale_no})",
         )
@@ -318,31 +289,7 @@ def void_return(*, sale_return, user, reason):
             code="credit_in_use",
         )
 
-    items = list(ret.items.select_related("product", "sale_item__bike_unit"))
-
-    units = {
-        unit.pk: unit
-        for unit in BikeUnit.objects.select_for_update().filter(
-            pk__in=[i.sale_item.bike_unit_id for i in items if i.sale_item.bike_unit_id]
-        )
-    }
-
-    for item in items:
-        bike = item.sale_item.bike_unit_id
-
-        if bike and units[bike].status != BikeUnit.Status.IN_STOCK:
-            raise Conflict(
-                f"Bike {units[bike].chassis_no} is no longer in stock, so "
-                "this return cannot be undone.",
-                code="bike_unavailable",
-            )
-
-    for item in items:
-        if item.sale_item.bike_unit_id:
-            unit = units[item.sale_item.bike_unit_id]
-            unit.status = BikeUnit.Status.SOLD
-            unit.save(update_fields=["status", "updated_at"])
-
+    for item in ret.items.select_related("product"):
         # Raises if the goods are no longer in stock, which undoes it all.
         create_stock_movement(
             user=user,
@@ -350,7 +297,6 @@ def void_return(*, sale_return, user, reason):
             product=item.product,
             movement_type=StockMovement.MovementType.ADJUSTMENT_OUT,
             quantity=item.quantity,
-            stock_condition=item.stock_condition,
             reference=ret.return_no,
             notes=f"Return {ret.return_no} voided",
         )
