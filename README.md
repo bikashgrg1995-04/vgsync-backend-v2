@@ -622,10 +622,16 @@ Read-only reports for the active business. Money comes back as strings.
 | `GET` | `/reports/receivables/` | What customers owe, aged by sale date, per customer |
 | `GET` | `/reports/payables/` | What is owed to suppliers on received purchases, aged by purchase date |
 | `GET` | `/reports/stock-value/` | Stock on hand at purchase price, good and damaged apart |
+| `GET` | `/reports/sales-trend/` | Confirmed sales per `group_by` (`day`, `week`, `month`; default `month`), less returns |
+| `GET` | `/reports/top-products/` | Best sellers; `by=value` (default) or `quantity` |
+| `GET` | `/reports/top-customers/` | Customers by what they bought; walk-in sales are totalled apart |
+| `GET` | `/reports/top-suppliers/` | Suppliers by what was bought on received purchases |
+| `GET` | `/reports/payroll-summary/` | What staff earned and were paid, per person and per month |
 
 - **Profit and loss:** `income` (less `sale_refunds`) against `expenses` (less `purchase_refunds`), with `profit`, a split by category and a `by_month` list. Voided records are left out. A return that is not refunded in cash moves nothing.
 - **Ageing buckets:** `current` (0-30 days), `31_60`, `61_90`, `over_90`. The total matches the sum of customer `credit_to_receive` (without EMI) or supplier `outstanding`. EMI sales are shown separately as `emi_outstanding`, because their instalments fall due over months.
 - **Stock value:** `good_value`, `damaged_value`, `total_value` and per product lines, biggest first. Products with no purchase price are counted in `products_without_price` and valued at zero.
+- **Analytics:** `sales-trend`, `top-products`, `top-customers`, `top-suppliers` and `payroll-summary` take `date_from` and `date_to`; the `top-*` reports also take `limit` (1 to 100, default 10). Only confirmed sales and received (or partly received) purchases count; drafts, cancelled and void records are left out. `top-products` revenue is the line total before any discount or VAT on the whole sale, and lists local products and service charges under their name with the returned quantity taken off in `net_quantity`. `payroll-summary` shows `earned` (salary, wages and bonus less deductions) and `paid` for the period, and `owed_now`, the running balance of all earnings less all payments.
 
 ## Audit log API (owner only)
 
