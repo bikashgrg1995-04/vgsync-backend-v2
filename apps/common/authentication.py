@@ -2,6 +2,7 @@
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
+from apps.audit import context as audit_context
 from apps.accounts.access import AccessDenied, validate_user_access
 from apps.accounts.models import User
 from apps.businesses.models import Business
@@ -68,6 +69,9 @@ class VGSyncJWTAuthentication(JWTAuthentication):
         # Make the validated context available to API views and permissions.
         request.active_business = business
         request.access_mode = access_mode
+
+        # Tell the audit log who is acting, and in which business.
+        audit_context.identify(user, business)
 
         return user, token
 

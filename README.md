@@ -627,6 +627,19 @@ Read-only reports for the active business. Money comes back as strings.
 - **Ageing buckets:** `current` (0-30 days), `31_60`, `61_90`, `over_90`. The total matches the sum of customer `credit_to_receive` (without EMI) or supplier `outstanding`. EMI sales are shown separately as `emi_outstanding`, because their instalments fall due over months.
 - **Stock value:** `good_value`, `damaged_value`, `total_value` and per product lines, biggest first. Products with no purchase price are counted in `products_without_price` and valued at zero.
 
+## Audit log API (owner only)
+
+A history of who changed what, kept by the server for the active business. Nothing is written to it by the client and rows are never edited or deleted.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/audit/` | List, newest first. Filters: `model`, `object_id`, `action` (`create`, `update`, `delete`), `actor`, `created_at__gte`, `created_at__lte`; `search` on the record name and the user |
+| `GET` | `/audit/{id}/` | One entry |
+
+Each entry has `actor` and `actor_name`, `action`, `model` (for example `sales.sale`), `object_id`, `object_repr`, `changes` and a one line `summary`. For an update `changes` is `{"status": ["active", "void"]}` (old, new); for a create or delete it is the values. The whole history of one record is `?model=finance.expense&object_id=12`.
+
+What is recorded: creates, changes and deletes of products, local products, stock adjustments and opening stock (not every stock movement, which already has its own history), suppliers, customers, bikes, purchases, sales, payments, returns, credits, expenses, income, payroll payments and salary profiles, staff users, positions and businesses. Voids, cancellations and confirmations show as `status` changes. Passwords are never recorded. Changes made outside an API request (a shell, a migration) are not logged. An entry is written in the same transaction as the change, so a change that is rolled back leaves no entry.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.

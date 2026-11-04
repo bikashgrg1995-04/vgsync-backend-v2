@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "apps.sales.apps.SalesConfig",
     "apps.parties.apps.PartiesConfig",
     "apps.reports.apps.ReportsConfig",
+    "apps.audit.apps.AuditConfig",
     "apps.finance.apps.FinanceConfig",
 ]
 
@@ -66,6 +67,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.audit.middleware.AuditContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
