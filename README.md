@@ -662,6 +662,10 @@ Needs the `reminders` module permission (owner, admin and accountant have it by 
 
 No scheduler is needed: listing makes the business's notifications first, at most once every 15 minutes. To make them for every business on a schedule (for example to send reminders from another tool), run `python manage.py generate_notifications` daily. It is safe to run as often as you like.
 
+### Downloading reports and statements
+
+Every report above, and the customer and supplier statements, can be downloaded by adding `export=xlsx` or `export=pdf` to the same request, for example `GET /reports/profit-loss/?date_from=2026-04-01&export=pdf` or `GET /customers/7/statement/?export=xlsx`. The same filters apply, the response is the file (`Content-Disposition: attachment`, named like `profit-loss-20261104.pdf`), and an unknown value returns `400`. A statement download carries every row, not one page. Excel files have a Summary sheet and one sheet per table, with real numbers (text that looks like a formula is never run). PDFs use DejaVu Sans when it is installed; set `PDF_FONT` and `PDF_FONT_BOLD` in the settings to the paths of other TTF files (for example a Noto Sans Devanagari font) so Nepali names print correctly.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.

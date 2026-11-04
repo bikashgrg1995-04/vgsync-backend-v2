@@ -6,7 +6,9 @@ from rest_framework.views import APIView
 from apps.common.dates import parse_query_date
 from apps.common.permissions import IsOwner
 
-from . import queries
+from apps.common import export
+
+from . import exports, queries
 
 
 def _date(request, name):
@@ -60,9 +62,23 @@ def _choice(request, name, allowed, default):
 
 
 class OwnerReport(APIView):
-    """Reports belong to the owner of the active business."""
+    """
+    Reports belong to the owner of the active business. Add
+    ``?export=xlsx`` or ``?export=pdf`` to download one as a file.
+    """
 
     permission_classes = [IsOwner]
+    builder = None
+
+    def output(self, request, data):
+        kind = export.requested(request)
+
+        if kind is None:
+            return Response(data)
+
+        document = type(self).builder(data, request.active_business)
+
+        return export.respond(document, kind)
 
 
 class ProfitLossView(OwnerReport):
@@ -71,6 +87,8 @@ class ProfitLossView(OwnerReport):
     refunds to customers, against expenses less refunds from suppliers.
     Filters: ``date_from``, ``date_to``. Includes a month by month split.
     """
+
+    builder = staticmethod(exports.profit_loss)
 
     def get(self, request):
         date_from = _date(request, "date_from")
@@ -81,7 +99,7 @@ class ProfitLossView(OwnerReport):
 
         report = queries.profit_and_loss(request.active_business, date_from, date_to)
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **report,
@@ -91,10 +109,12 @@ class ProfitLossView(OwnerReport):
 class ReceivablesView(OwnerReport):
     """What customers owe, aged by sale date. EMI sales are shown apart."""
 
+    builder = staticmethod(exports.receivables)
+
     def get(self, request):
         today = timezone.localdate()
 
-        return Response({
+        return self.output(request, {
             "as_of": today,
             **queries.receivables(request.active_business, today),
         })
@@ -103,10 +123,12 @@ class ReceivablesView(OwnerReport):
 class PayablesView(OwnerReport):
     """What is owed to suppliers on received goods, aged by purchase date."""
 
+    builder = staticmethod(exports.payables)
+
     def get(self, request):
         today = timezone.localdate()
 
-        return Response({
+        return self.output(request, {
             "as_of": today,
             **queries.payables(request.active_business, today),
         })
@@ -115,8 +137,10 @@ class PayablesView(OwnerReport):
 class StockValueView(OwnerReport):
     """Stock on hand valued at purchase price, good and damaged apart."""
 
+    builder = staticmethod(exports.stock_value)
+
     def get(self, request):
-        return Response(queries.stock_value(request.active_business))
+        return self.output(request, queries.stock_value(request.active_business))
 
 
 class SalesTrendView(OwnerReport):
@@ -125,11 +149,13 @@ class SalesTrendView(OwnerReport):
     ``month``), less returns. Filters: ``date_from``, ``date_to``.
     """
 
+    builder = staticmethod(exports.sales_trend)
+
     def get(self, request):
         date_from, date_to = _range(request)
         group_by = _choice(request, "group_by", ("day", "week", "month"), "month")
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **queries.sales_trend(request.active_business, date_from, date_to, group_by),
@@ -142,10 +168,12 @@ class TopProductsView(OwnerReport):
     ``limit`` is 1 to 100 (default 10). Filters: ``date_from``, ``date_to``.
     """
 
+    builder = staticmethod(exports.top_products)
+
     def get(self, request):
         date_from, date_to = _range(request)
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **queries.top_products(
@@ -158,10 +186,12 @@ class TopProductsView(OwnerReport):
 class TopCustomersView(OwnerReport):
     """Customers by what they bought; walk-in sales are totalled apart."""
 
+    builder = staticmethod(exports.top_customers)
+
     def get(self, request):
         date_from, date_to = _range(request)
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **queries.top_customers(
@@ -173,10 +203,12 @@ class TopCustomersView(OwnerReport):
 class TopSuppliersView(OwnerReport):
     """Suppliers by what was bought from them."""
 
+    builder = staticmethod(exports.top_suppliers)
+
     def get(self, request):
         date_from, date_to = _range(request)
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **queries.top_suppliers(
@@ -188,10 +220,12 @@ class TopSuppliersView(OwnerReport):
 class PayrollSummaryView(OwnerReport):
     """What staff earned and were paid in the period, and what is owed now."""
 
+    builder = staticmethod(exports.payroll_summary)
+
     def get(self, request):
         date_from, date_to = _range(request)
 
-        return Response({
+        return self.output(request, {
             "date_from": date_from,
             "date_to": date_to,
             **queries.payroll_summary(request.active_business, date_from, date_to),
