@@ -646,6 +646,22 @@ Each entry has `actor` and `actor_name`, `action`, `model` (for example `sales.s
 
 What is recorded: creates, changes and deletes of products, local products, stock adjustments and opening stock (not every stock movement, which already has its own history), suppliers, customers, bikes, purchases, sales, payments, returns, credits, expenses, income, payroll payments and salary profiles, staff users, positions and businesses. Voids, cancellations and confirmations show as `status` changes. Passwords are never recorded. Changes made outside an API request (a shell, a migration) are not logged. An entry is written in the same transaction as the change, so a change that is rolled back leaves no entry.
 
+## Notifications API
+
+Follow-ups that need action, shown as notifications for the active business. They are made from pending follow-ups (maintenance checks, EMI instalments, credit to receive) that are due today, and again when they become overdue. A notification disappears once its follow-up is done, skipped or paid.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/notifications/` | List, newest first. Filters: `unread=true` or `false` (for you), `kind` (`followup_due`, `followup_overdue`); `search` |
+| `GET` | `/notifications/{id}/` | One notification |
+| `GET` | `/notifications/unread-count/` | `{"unread": 3}`, for a badge |
+| `POST` | `/notifications/{id}/read/` | Mark it read, for you only |
+| `POST` | `/notifications/read-all/` | Mark every unread one read, for you only |
+
+Needs the `reminders` module permission (owner, admin and accountant have it by role; staff need it on their Position). Viewing is enough to mark notifications read, so a company owner can do it inside a branch. Every person has their own read state.
+
+No scheduler is needed: listing makes the business's notifications first, at most once every 15 minutes. To make them for every business on a schedule (for example to send reminders from another tool), run `python manage.py generate_notifications` daily. It is safe to run as often as you like.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.

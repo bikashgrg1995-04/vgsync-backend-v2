@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "apps.parties.apps.PartiesConfig",
     "apps.reports.apps.ReportsConfig",
     "apps.audit.apps.AuditConfig",
+    "apps.notifications.apps.NotificationsConfig",
     "apps.finance.apps.FinanceConfig",
 ]
 
