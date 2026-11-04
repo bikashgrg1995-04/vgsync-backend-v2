@@ -232,6 +232,21 @@ Two things to configure for production:
 
 Owners cannot be created, edited or deleted through the API. Only Django Admin does that.
 
+## Company and business API (owner only)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET`, `PATCH` | `/company/` | View or rename the owner's company (the code is fixed) |
+| `GET`, `POST` | `/businesses/` | List the Head Office and Branches (filters: `business_type`, `is_active`, `search`), or add a Branch |
+| `GET`, `PATCH` | `/businesses/{id}/` | View or edit name, address, phone, email |
+| `POST` | `/businesses/{id}/deactivate/` | Switch a Branch off: its users can no longer sign in or switch to it |
+| `POST` | `/businesses/{id}/activate/` | Switch it back on |
+| `GET` | `/businesses/branches/` | Branch list used by the business switcher |
+
+- A company owner adds Branches from the **Head Office** (`409 not_head_office` otherwise) and cannot write from inside a Branch (read-only). The Branch's type, company and parent are set by the server; `business_code` is made upper case, must be unique (ignoring case) and cannot change afterwards.
+- An independent owner sees and edits only their own business, cannot add Branches, and has no company (`409 no_company`).
+- Businesses are never deleted. The Head Office cannot be deactivated. Companies, Head Offices, owners and independent businesses are still created in Django Admin.
+
 ## Team management API (owner only)
 
 Everything below is limited to the **owner** of the active business, and works on the team of that business:

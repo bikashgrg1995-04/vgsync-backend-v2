@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/v1/", include("apps.accounts.manage_urls")),
 
     # Business and inventory
+    path("api/v1/company/", include("apps.companies.urls")),
     path("api/v1/businesses/", include("apps.businesses.urls")),
     path("api/v1/inventory/", include("apps.inventory.urls")),
 
