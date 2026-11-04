@@ -148,7 +148,10 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
 
         if item.product_id is None:
             raise serializers.ValidationError(
-                {"items": f"{item.description}: a service charge cannot be returned."}
+                {"items": (
+                    f"{item.description}: only goods from stock can be "
+                    "returned, not a service charge or a local product."
+                )}
             )
 
         if item.bike_unit_id:

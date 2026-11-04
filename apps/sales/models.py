@@ -330,7 +330,15 @@ class SaleItem(models.Model):
         blank=True,
         related_name="sale_items",
     )
-    # What a service charge is for.
+    # A sales-only product (no stock): nothing is taken from stock when sold.
+    local_product = models.ForeignKey(
+        "inventory.LocalProduct",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="sale_items",
+    )
+    # What a service charge or a local product line is for.
     description = models.CharField(max_length=200, blank=True)
     # Set on bike sales: the exact bike sold.
     bike_unit = models.ForeignKey(
@@ -354,6 +362,10 @@ class SaleItem(models.Model):
             models.CheckConstraint(
                 condition=Q(bike_unit__isnull=True) | Q(product__isnull=False),
                 name="sale_item_bike_has_product",
+            ),
+            models.CheckConstraint(
+                condition=Q(product__isnull=True) | Q(local_product__isnull=True),
+                name="sale_item_not_product_and_local_product",
             ),
             models.CheckConstraint(
                 condition=Q(quantity__gt=0),

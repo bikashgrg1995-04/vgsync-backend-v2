@@ -27,6 +27,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
+from apps.inventory.models import LocalProduct
 from apps.purchases.views import MONEY_FIELD, sum_of
 
 from .models import (
@@ -55,6 +56,7 @@ from .serializers import (
     FollowupDoneSerializer,
     FollowupSerializer,
     FollowupSkipSerializer,
+    LocalProductSerializer,
     ReasonSerializer,
     SaleCreditSettlementSerializer,
     SaleDetailSerializer,
@@ -760,3 +762,39 @@ class SaleCreditViewSet(SalesBaseViewSet):
         )
 
         return Response(self.get_serializer(settlement).data)
+
+
+# ---------------------------------------------------------------------------
+# Local products
+# ---------------------------------------------------------------------------
+
+class LocalProductViewSet(SalesBaseViewSet):
+    """
+    Sales-only products of the active business (services, accessories bought
+    in for a customer, anything not kept in stock). Selling one takes
+    nothing from stock and it cannot be returned to stock. ``DELETE``
+    deactivates; a local product that was sold is never removed.
+    """
+
+    serializer_class = LocalProductSerializer
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    filterset_fields = ("is_active",)
+    search_fields = ("name", "brand", "description")
+    ordering_fields = ("name", "sale_price", "created_at")
+    ordering = ("name",)
+
+    def get_queryset(self):
+        return LocalProduct.objects.filter(business=self.request.active_business)
+
+    def perform_create(self, serializer):
+        serializer.save(business=self.request.active_business)
+
+    def destroy(self, request, *args, **kwargs):
+        product = self.get_object()
+
+        if product.is_active:
+            product.is_active = False
+            product.save(update_fields=["is_active", "updated_at"])
+
+        return Response(self.get_serializer(product).data)

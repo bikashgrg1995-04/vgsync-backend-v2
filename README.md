@@ -482,6 +482,10 @@ A draft can be edited freely and has no effect on stock. `confirm` takes every l
 | `POST` | `/sales/{id}/cancel/` | Cancel a draft, with a `reason` |
 | `GET`, `POST` | `/sales/payments/` | List or record a customer payment (full or part, also on a draft as an advance) |
 | `POST` | `/sales/payments/{id}/void/` | Void a payment, with a `reason` |
+| `GET`, `POST` | `/sales/local-products/` | List or add local (sales-only) products |
+| `GET`, `PATCH`, `DELETE` | `/sales/local-products/{id}/` | View, edit or deactivate a local product |
+
+**Local products.** A local product is a sales-only item of the business (a service, an accessory bought in for a customer, anything not kept in stock). Sell it with `{"local_product": 4, "quantity": "1"}` on a stock or maintenance sale, alone or next to stock lines. The price defaults to its sale price and can be changed on the line. The line is named after the product, nothing is taken from stock when the sale is confirmed, and income, payments and follow-ups work as for any sale. Bike sales cannot contain local products, and a line cannot be both a product and a local product. Local product lines cannot be returned (only goods from stock can). `DELETE` only deactivates a local product; one already on a draft still sells.
 
 Create a sale:
 

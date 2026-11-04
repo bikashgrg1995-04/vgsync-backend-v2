@@ -77,6 +77,8 @@ def add_months(day, months):
 
 
 def _price(price, product):
+    # ``product`` may be a catalog Product or a LocalProduct: both have a
+    # default sale price.
     if price is None and product is not None:
         price = product.sale_price
 
@@ -88,22 +90,23 @@ def _resolve_items(business, sale_type, items):
     Turn the lines sent by the client into lines ready to store, checking
     them against the kind of sale:
 
-    * stock: products only.
+    * stock: products, and local products (sales-only, no stock).
     * bike: bike units only, one each, in stock in this business.
-    * maintenance: stock parts, and service charges (a description, no
-      product, nothing taken from stock).
+    * maintenance: stock parts, local products, and service charges (a
+      description, no product, nothing taken from stock).
     """
     resolved = []
     seen_units = set()
 
     for entry in items:
         product = entry.get("product")
+        local = entry.get("local_product")
         unit = entry.get("bike_unit")
         description = (entry.get("description") or "").strip()
         quantity = entry.get("quantity")
 
         if sale_type == Sale.SaleType.BIKE:
-            if unit is None or product is not None or description:
+            if unit is None or product is not None or local is not None or description:
                 raise serializers.ValidationError({
                     "items": "A bike sale lists bike units (bike_unit) only."
                 })
@@ -143,31 +146,46 @@ def _resolve_items(business, sale_type, items):
                     {"items": "Every line needs a quantity."}
                 )
 
-            if product is None and sale_type != Sale.SaleType.MAINTENANCE:
+            if local is not None:
+                if product is not None or description:
+                    raise serializers.ValidationError({
+                        "items": (
+                            "A line is a product, a local product or a "
+                            "service charge, not a mix."
+                        )
+                    })
+
+                # The line is named after the local product.
+                description = local.name
+
+            elif product is None and sale_type != Sale.SaleType.MAINTENANCE:
                 raise serializers.ValidationError(
                     {"items": "Choose a product for every line."}
                 )
 
-            if product is None and not description:
+            elif product is None and not description:
                 raise serializers.ValidationError({
                     "items": "A service charge needs a description."
                 })
 
-            if product is not None and description:
+            elif product is not None and description:
                 raise serializers.ValidationError({
                     "items": "A line is a product or a service charge, not both."
                 })
 
-        price = _price(entry.get("unit_price"), product)
+        price = _price(entry.get("unit_price"), product or local)
 
         if price is None or price <= 0:
-            what = product.name if product else (description or "This line")
+            what = (
+                product.name if product else (description or "This line")
+            )
             raise serializers.ValidationError({
                 "items": f"{what} has no price. Enter a price for this line."
             })
 
         resolved.append({
             "product": product,
+            "local_product": local,
             "bike_unit": unit,
             "description": description,
             "quantity": quantity,
@@ -296,6 +314,7 @@ def _write_items(sale, items, totals):
         SaleItem(
             sale=sale,
             product=item["product"],
+            local_product=item["local_product"],
             bike_unit=item["bike_unit"],
             description=item["description"],
             quantity=item["quantity"],

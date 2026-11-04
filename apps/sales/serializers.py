@@ -4,6 +4,7 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.inventory.models import LocalProduct
 from apps.inventory.services.products import get_products_for_business
 
 from .models import (
@@ -124,6 +125,19 @@ class CatalogProductField(serializers.PrimaryKeyRelatedField):
         return get_products_for_business(self.context["request"].active_business)
 
 
+class LocalProductField(serializers.PrimaryKeyRelatedField):
+    """An active sales-only product of the active business."""
+
+    default_error_messages = {
+        "does_not_exist": "Choose an active local product of this business.",
+    }
+
+    def get_queryset(self):
+        return LocalProduct.objects.filter(
+            business=self.context["request"].active_business, is_active=True
+        )
+
+
 class BikeUnitField(serializers.PrimaryKeyRelatedField):
     """A bike unit of the active business."""
 
@@ -139,11 +153,13 @@ class BikeUnitField(serializers.PrimaryKeyRelatedField):
 
 class SaleItemInputSerializer(serializers.Serializer):
     """
-    A line. Stock sale: ``product``. Bike sale: ``bike_unit``. Maintenance:
-    a ``product`` (a part) or a ``description`` (a service charge).
+    A line. Stock sale: ``product`` or ``local_product``. Bike sale:
+    ``bike_unit``. Maintenance: a ``product`` (a part), a ``local_product``
+    or a ``description`` (a service charge).
     """
 
     product = CatalogProductField(required=False)
+    local_product = LocalProductField(required=False)
     bike_unit = BikeUnitField(required=False)
     description = serializers.CharField(
         max_length=200, required=False, allow_blank=True
@@ -259,6 +275,7 @@ class SaleItemSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "product",
+            "local_product",
             "product_name",
             "stock_no",
             "bike_unit",
@@ -907,3 +924,52 @@ class SaleCreditSettlementSerializer(serializers.ModelSerializer):
                 )
 
         return attrs
+
+
+# ---------------------------------------------------------------------------
+# Local products
+# ---------------------------------------------------------------------------
+
+class LocalProductSerializer(serializers.ModelSerializer):
+    sale_price = serializers.DecimalField(
+        **MONEY, min_value=Decimal("0"), required=False
+    )
+    purchase_price = serializers.DecimalField(
+        **MONEY, min_value=Decimal("0"), required=False
+    )
+
+    class Meta:
+        model = LocalProduct
+        fields = (
+            "id",
+            "name",
+            "description",
+            "brand",
+            "unit",
+            "purchase_price",
+            "sale_price",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate_name(self, value):
+        value = value.strip()
+
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+
+        taken = LocalProduct.objects.filter(
+            business=self.context["request"].active_business, name__iexact=value
+        )
+
+        if self.instance:
+            taken = taken.exclude(pk=self.instance.pk)
+
+        if taken.exists():
+            raise serializers.ValidationError(
+                "A local product with this name already exists."
+            )
+
+        return value
