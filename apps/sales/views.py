@@ -126,6 +126,7 @@ class CustomerViewSet(SalesBaseViewSet):
     serializer_class = CustomerSerializer
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
+    # ``has_dues=true`` is also accepted (see ``get_queryset``).
     filterset_fields = ("is_active", "customer_type")
     search_fields = ("name", "phone", "pan_number")
     ordering_fields = ("name", "created_at", "credit_to_receive")
@@ -135,7 +136,7 @@ class CustomerViewSet(SalesBaseViewSet):
         active = SalePayment.Status.ACTIVE
         confirmed = Sale.Status.CONFIRMED
 
-        return Customer.objects.filter(
+        queryset = Customer.objects.filter(
             business=self.request.active_business
         ).annotate(
             _net=sum_of(
@@ -228,6 +229,12 @@ class CustomerViewSet(SalesBaseViewSet):
                 output_field=MONEY_FIELD,
             ),
         )
+
+        # ``?has_dues=true`` keeps only customers who still owe money.
+        if self.request.query_params.get("has_dues", "").lower() in ("true", "1"):
+            queryset = queryset.filter(credit_to_receive__gt=0)
+
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(business=self.request.active_business)

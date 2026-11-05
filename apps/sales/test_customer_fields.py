@@ -70,3 +70,14 @@ class CustomerTypeAndLimitTests(SaleTestCase):
 
         self.assertFalse(self.figures()["over_credit_limit"])
         self.assertEqual(self.figures()["credit_limit"], "0.00")
+
+    def test_has_dues_lists_only_customers_who_owe(self):
+        self.add(name="Never bought")
+        sale = self.confirmed()  # self.customer owes 1500
+
+        owing = self.client.get(CUSTOMERS, {"has_dues": "true"}).json()
+        self.assertEqual([c["id"] for c in owing["results"]], [self.customer.pk])
+
+        self.pay(sale["id"], "1500.00")
+        self.assertEqual(self.client.get(CUSTOMERS, {"has_dues": "true"}).data["count"], 0)
+        self.assertEqual(self.client.get(CUSTOMERS).data["count"], 2)
