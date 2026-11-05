@@ -150,6 +150,12 @@ Base path: `/api/v1/auth/`
 | `POST` | `/logout/` | None | Revoke a refresh token |
 | `GET` | `/me/` | Bearer | Current user and active business |
 | `POST` | `/change-password/` | Bearer | Change password and sign out everywhere |
+| `POST` | `/forgot-password/` | None | Email a one-time reset link (`business_code`, `username`) |
+| `POST` | `/reset-password/` | None | Set a new password from the link (`uid`, `token`, `new_password`, `confirm_password`) |
+
+### Forgot and reset password
+
+`/forgot-password/` always returns the same `200` message, whether or not the account exists or has an email, so it cannot be used to find usernames. When the account has an email, the mail contains `FRONTEND_URL/reset-password?uid=...&token=...`. The link is valid for `PASSWORD_RESET_TIMEOUT` seconds (default 3600) and works once. Resetting clears `must_change_password` and signs the user out everywhere. With `EMAIL_HOST` empty, emails are printed to the server console (development).
 
 ### Login
 
@@ -214,6 +220,9 @@ Auth endpoints are rate limited. Exceeding a limit returns `429` with a `Retry-A
 | `/login/` | 5 per minute | business code + username (any IP) |
 | `/token/refresh/`, `/logout/` | 60 per minute | IP address |
 | `/change-password/` | 10 per hour | user |
+| `/forgot-password/` | 10 per hour | IP address |
+| `/forgot-password/` | 3 per hour | business code + username |
+| `/reset-password/` | 20 per hour | IP address |
 
 Rates are set in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in `config/settings.py`. Successful logins count toward the limits too.
 

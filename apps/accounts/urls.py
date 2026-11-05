@@ -5,9 +5,11 @@ from .views import (
     BusinessContextSwitchView,
     ChangePasswordView,
     CurrentUserView,
+    ForgotPasswordView,
     LoginView,
     LogoutView,
     RefreshTokenView,
+    ResetPasswordView,
 )
 
 
@@ -22,6 +24,16 @@ urlpatterns = [
         "business-context/",
         BusinessContextSwitchView.as_view(),
         name="business-context-switch",
+    ),
+    path(
+        "forgot-password/",
+        ForgotPasswordView.as_view(),
+        name="forgot-password",
+    ),
+    path(
+        "reset-password/",
+        ResetPasswordView.as_view(),
+        name="reset-password",
     ),
     path("change-password/", ChangePasswordView.as_view(), name="change-password"),
 ]

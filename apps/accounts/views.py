@@ -11,6 +11,9 @@ from rest_framework_simplejwt.views import (
 
 from apps.common.throttling import (
     ChangePasswordRateThrottle,
+    ForgotPasswordAccountRateThrottle,
+    ForgotPasswordIPRateThrottle,
+    ResetPasswordRateThrottle,
     LoginAccountRateThrottle,
     LoginIPRateThrottle,
     TokenIPRateThrottle,
@@ -19,7 +22,9 @@ from apps.common.throttling import (
 from .access import serialize_active_business
 from .serializers import (
     ChangePasswordSerializer,
+    ForgotPasswordSerializer,
     LogoutSerializer,
+    ResetPasswordSerializer,
     UserProfileSerializer,
     VGSyncTokenObtainPairSerializer,
     VGSyncTokenRefreshSerializer,
@@ -122,6 +127,9 @@ from rest_framework_simplejwt.views import (
 
 from apps.common.throttling import (
     ChangePasswordRateThrottle,
+    ForgotPasswordAccountRateThrottle,
+    ForgotPasswordIPRateThrottle,
+    ResetPasswordRateThrottle,
     LoginAccountRateThrottle,
     LoginIPRateThrottle,
     TokenIPRateThrottle,
@@ -131,7 +139,9 @@ from .access import serialize_active_business
 from .serializers import (
     BusinessContextSwitchSerializer,
     ChangePasswordSerializer,
+    ForgotPasswordSerializer,
     LogoutSerializer,
+    ResetPasswordSerializer,
     UserProfileSerializer,
     VGSyncTokenObtainPairSerializer,
     VGSyncTokenRefreshSerializer,
@@ -243,5 +253,53 @@ class ChangePasswordView(APIView):
 
         return Response(
             {"detail": "Password changed successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ForgotPasswordView(APIView):
+    """
+    Emails a one-time reset link to the account's email address. The reply
+    is always the same, whether or not the account exists or has an email.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [
+        ForgotPasswordIPRateThrottle,
+        ForgotPasswordAccountRateThrottle,
+    ]
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            {
+                "detail": (
+                    "If the account has an email address, a password reset "
+                    "link has been sent. Otherwise ask your owner or admin "
+                    "to reset your password."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ResetPasswordView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ResetPasswordRateThrottle]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(
+            {"detail": "Password reset. Please log in with your new password."},
             status=status.HTTP_200_OK,
         )

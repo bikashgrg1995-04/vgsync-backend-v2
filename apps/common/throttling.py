@@ -85,3 +85,54 @@ class ChangePasswordRateThrottle(SimpleRateThrottle):
             "scope": self.scope,
             "ident": request.user.pk,
         }
+
+
+class ForgotPasswordIPRateThrottle(SimpleRateThrottle):
+    """Limits password-reset requests from one IP address."""
+
+    scope = "forgot_password_ip"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }
+
+
+class ForgotPasswordAccountRateThrottle(SimpleRateThrottle):
+    """
+    Limits reset emails per account (business code + username) so one
+    person cannot be flooded with emails from many addresses.
+    """
+
+    scope = "forgot_password_account"
+
+    def get_cache_key(self, request, view):
+        data = request.data
+
+        if not isinstance(data, Mapping):
+            return None
+
+        business_code = str(data.get("business_code", "")).strip().lower()
+        username = str(data.get("username", "")).strip()
+
+        if not business_code or not username:
+            return None
+
+        ident = hashlib.sha256(
+            f"{business_code}\0{username}".encode()
+        ).hexdigest()
+
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+
+class ResetPasswordRateThrottle(SimpleRateThrottle):
+    """Limits reset-token guessing from one IP address."""
+
+    scope = "reset_password"
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": self.get_ident(request),
+        }

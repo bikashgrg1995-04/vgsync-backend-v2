@@ -1,6 +1,11 @@
 
+from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
 from django.db import transaction
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from rest_framework import serializers
 
@@ -403,3 +408,126 @@ class LogoutSerializer(serializers.Serializer):
             # Expired, malformed or already blacklisted: there is nothing
             # left to revoke, so logging out again is not an error.
             pass
+
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    """
+    Starts a password reset. It never says whether the account exists or
+    has an email address, so it cannot be used to discover usernames.
+    """
+
+    business_code = serializers.CharField(max_length=50)
+    username = serializers.CharField(max_length=150)
+
+    def _find_user(self):
+        business_code = self.validated_data["business_code"].strip()
+        username = self.validated_data["username"].strip()
+
+        business = (
+            Business.objects
+            .select_related("company")
+            .filter(business_code__iexact=business_code, is_active=True)
+            .first()
+        )
+
+        if not business:
+            return None
+
+        if business.company_id and not business.company.is_active:
+            return None
+
+        users = (
+            User.objects
+            .filter(username=username, is_active=True)
+            .exclude(role=User.Role.SUPER_ADMIN)
+        )
+
+        if business.company_id:
+            return users.filter(tenant_company_id=business.company_id).first()
+
+        return users.filter(
+            business_id=business.id,
+            tenant_company__isnull=True,
+        ).first()
+
+    def save(self, **kwargs):
+        user = self._find_user()
+
+        if not user or not user.email:
+            return False
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = default_token_generator.make_token(user)
+        business_code = self.validated_data["business_code"].strip()
+        link = (
+            f"{settings.FRONTEND_URL}/reset-password"
+            f"?uid={uid}&token={token}"
+        )
+        minutes = max(settings.PASSWORD_RESET_TIMEOUT // 60, 1)
+
+        send_mail(
+            subject="Reset your VGSync password",
+            message=(
+                f"Hello {user.first_name or user.username},\n\n"
+                f"We received a request to reset the password for "
+                f"{user.username} ({business_code}).\n\n"
+                f"Open this link to choose a new password "
+                f"(valid for {minutes} minutes, one use only):\n{link}\n\n"
+                f"If you did not ask for this, ignore this email; your "
+                f"password stays the same."
+            ),
+            from_email=None,
+            recipient_list=[user.email],
+            fail_silently=True,
+        )
+
+        return True
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    confirm_password = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate(self, attrs):
+        invalid = serializers.ValidationError({
+            "detail": "This reset link is invalid or has expired."
+        })
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(attrs["uid"]))
+            user = User.objects.get(pk=user_id, is_active=True)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            raise invalid
+
+        if user.role == User.Role.SUPER_ADMIN:
+            raise invalid
+
+        if not default_token_generator.check_token(user, attrs["token"]):
+            raise invalid
+
+        if attrs["new_password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({
+                "confirm_password": "Passwords do not match."
+            })
+
+        validate_password(attrs["new_password"], user=user)
+
+        attrs["user"] = user
+
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.validated_data["user"]
+
+        with transaction.atomic():
+            user.set_password(self.validated_data["new_password"])
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
+
+            # Signs the user out everywhere; also makes this link single-use
+            # because the token depends on the password hash.
+            revoke_all_refresh_tokens(user)
+
+        return user
