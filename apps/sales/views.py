@@ -126,7 +126,7 @@ class CustomerViewSet(SalesBaseViewSet):
     serializer_class = CustomerSerializer
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
-    filterset_fields = ("is_active",)
+    filterset_fields = ("is_active", "customer_type")
     search_fields = ("name", "phone", "pan_number")
     ordering_fields = ("name", "created_at", "credit_to_receive")
     ordering = ("name",)

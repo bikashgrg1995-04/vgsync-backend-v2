@@ -614,6 +614,8 @@ Customers and suppliers are parties of their own business. Every purchase, purch
 | --- | --- | --- |
 | `GET`, `POST` | `/customers/` | List or add customers (profile includes what they owe and the credit you owe them) |
 | `GET`, `PATCH`, `DELETE` | `/customers/{id}/` | View, edit or deactivate a customer |
+
+A customer has a `customer_type` (`individual`, `business` or `fleet`; filter with `?customer_type=`) and a `credit_limit` (0 = none set). `over_credit_limit` is true when what the customer owes is above the limit. It is a warning only; a sale is never blocked by it. Phone, email and PAN are optional, but a phone number is unique within a business.
 | `GET` | `/customers/{id}/statement/` | Full history: sales, payments, returns, credit use and refunds |
 | `GET`, `POST` | `/suppliers/` | List or add suppliers (profile includes outstanding, advance, credit to pay and credit to receive) |
 | `GET`, `PATCH`, `DELETE` | `/suppliers/{id}/` | View, edit or deactivate a supplier |
