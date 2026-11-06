@@ -187,6 +187,50 @@ class StockAPITests(APITestCase):
             "0.000",
         )
 
+    def test_stock_list_has_catalog_fields_and_status(self):
+        self.create_company_owner()
+        self.login("stock-owner", "STOCK-HO")
+
+        self.product.category = "Oil"
+        self.product.reorder_level = Decimal("10.000")
+        self.product.save()
+
+        StockBalance.objects.create(
+            product=self.product,
+            business=self.head_office,
+            quantity=Decimal("4.000"),
+        )
+
+        response = self.client.get(self.stock_url)
+        self.assertEqual(response.status_code, 200, response.data)
+
+        by_id = {item["product_id"]: item for item in response.data}
+        low = by_id[self.product.pk]
+
+        self.assertEqual(low["category"], "Oil")
+        self.assertEqual(low["sale_price"], "1000.00")
+        self.assertEqual(low["reorder_level"], "10.000")
+        self.assertEqual(low["stock_status"], "low")
+        self.assertEqual(by_id[self.second_product.pk]["stock_status"], "out")
+
+        StockBalance.objects.filter(product=self.product).update(
+            quantity=Decimal("40.000")
+        )
+        response = self.client.get(self.stock_url)
+        by_id = {item["product_id"]: item for item in response.data}
+        self.assertEqual(by_id[self.product.pk]["stock_status"], "in_stock")
+
+    def test_negative_reorder_level_is_rejected(self):
+        self.create_company_owner()
+        self.login("stock-owner", "STOCK-HO")
+
+        response = self.client.post(
+            "/api/v1/inventory/products/",
+            {"stock_no": "NEG-1", "name": "Neg", "reorder_level": "-1"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+
     def test_stock_list_includes_products_with_zero_stock(self):
         self.create_company_owner()
         self.login("stock-owner", "STOCK-HO")
