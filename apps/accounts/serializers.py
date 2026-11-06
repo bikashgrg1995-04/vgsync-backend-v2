@@ -33,6 +33,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     company_name = serializers.SerializerMethodField()
     business_name = serializers.SerializerMethodField()
     position_name = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+    can_manage_team = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -48,6 +50,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "company_name",
             "business_name",
             "position_name",
+            "permissions",
+            "can_manage_team",
             "must_change_password",
         )
         read_only_fields = fields
@@ -60,6 +64,37 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     def get_position_name(self, obj):
         return obj.position.name if obj.position else None
+
+    def _position_grants(self, obj):
+        position = obj.position
+
+        if obj.role != User.Role.STAFF or not position or not position.is_active:
+            return []
+
+        return list(position.permissions.all())
+
+    def get_permissions(self, obj):
+        """What a staff member's position allows, so screens can hide the rest."""
+        return [
+            {
+                "module": item.module,
+                "can_view": item.can_view,
+                "can_create": item.can_create,
+                "can_update": item.can_update,
+                "can_delete": item.can_delete,
+            }
+            for item in self._position_grants(obj)
+        ]
+
+    def get_can_manage_team(self, obj):
+        """Owner, or staff whose position grants the staff module."""
+        if obj.role == User.Role.OWNER:
+            return True
+
+        return any(
+            item.module == "staff" and item.can_view
+            for item in self._position_grants(obj)
+        )
 
 
 class VGSyncTokenObtainPairSerializer(TokenObtainPairSerializer):

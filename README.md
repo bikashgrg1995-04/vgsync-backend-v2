@@ -268,6 +268,8 @@ Admins, accountants and staff get `403`. Records of another company or business 
 
 ### Staff
 
+**Who can use the team and Positions APIs.** The owner can do everything. Staff whose Position grants the `staff` module (the "Administration" position) can manage other **staff** accounts with the matching View/Create/Update/Delete right, and can read Positions. They cannot: manage themselves, create or change Positions, manage admin/accountant accounts, or assign or manage anyone with a Position that grants more than their own. Admin and accountant roles get no team access. `/auth/me/` and the login response now include `permissions` and `can_manage_team` so screens can hide what a person cannot use.
+
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/staff/` | List the team. Filters: `role`, `is_active`, `position`. Search: `search=`. Paginated |

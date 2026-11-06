@@ -12,7 +12,7 @@ from rest_framework import serializers
 from apps.businesses.models import Business
 
 from .models import Position, PositionPermission, User
-from .scope import MANAGEABLE_ROLES, username_taken
+from .scope import MANAGEABLE_ROLES, manageable_position_ids, username_taken
 
 
 def generate_temporary_password():
@@ -93,12 +93,18 @@ class _StaffInputSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        business = self.context["request"].active_business
+        request = self.context["request"]
+        business = request.active_business
 
-        self.fields["position"].queryset = Position.objects.filter(
-            business=business,
-            is_active=True,
-        )
+        positions = Position.objects.filter(business=business, is_active=True)
+
+        if request.user.role != User.Role.OWNER:
+            # A delegated administrator cannot hand out more than they have.
+            positions = positions.filter(
+                pk__in=manageable_position_ids(request.user, business)
+            )
+
+        self.fields["position"].queryset = positions
 
     @property
     def business(self):
@@ -108,6 +114,14 @@ class _StaffInputSerializer(serializers.ModelSerializer):
         instance = self.instance
 
         role = attrs.get("role", instance.role if instance else None)
+
+        if (
+            self.context["request"].user.role != User.Role.OWNER
+            and role != User.Role.STAFF
+        ):
+            raise serializers.ValidationError(
+                {"role": "You can only manage staff accounts."}
+            )
 
         if "position" in attrs:
             position = attrs["position"]
