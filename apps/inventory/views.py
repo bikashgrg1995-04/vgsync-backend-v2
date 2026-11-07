@@ -40,7 +40,10 @@ from apps.inventory.services.products import (
     update_product,
 )
 
-from apps.inventory.services.stock import create_stock_movement
+from apps.inventory.services.stock import (
+    create_stock_movement,
+    create_stock_adjustment,
+)
 
 
 # ==================================================
@@ -195,6 +198,7 @@ class StockListView(InventoryBaseView):
         serializer = BusinessStockSerializer(
             products,
             many=True,
+            context={"request": request}
         )
 
         return Response(serializer.data)
@@ -226,7 +230,10 @@ class StockDetailView(InventoryBaseView):
             [balance] if balance else []
         )
 
-        serializer = BusinessStockSerializer(product)
+        serializer = BusinessStockSerializer(
+            product,
+            context={"request": request},
+        )
 
         return Response(serializer.data)
 
@@ -306,6 +313,7 @@ class StockMovementListCreateView(GenericAPIView):
 
         return self.get_paginated_response(serializer.data)
 
+    
     def post(self, request):
         serializer = StockMovementCreateSerializer(
             data=request.data,
@@ -314,12 +322,35 @@ class StockMovementListCreateView(GenericAPIView):
 
         serializer.is_valid(raise_exception=True)
 
+        data = serializer.validated_data
+
         try:
-            movement = create_stock_movement(
-                user=request.user,
-                business=request.active_business,
-                **serializer.validated_data,
-            )
+            if data["movement_type"] in {
+                StockMovement.MovementType.ADJUSTMENT_IN,
+                StockMovement.MovementType.ADJUSTMENT_OUT,
+            }:
+                movement = create_stock_adjustment(
+                    user=request.user,
+                    business=request.active_business,
+                    product=data["product"],
+                    action=data["adjustment_action"],
+                    quantity=data["quantity"],
+                    reason=data["adjustment_reason"],
+                    reference=data["reference"],
+                    notes=data["notes"],
+                )
+
+            else:
+                movement = create_stock_movement(
+                    user=request.user,
+                    business=request.active_business,
+                    product=data["product"],
+                    movement_type=data["movement_type"],
+                    quantity=data["quantity"],
+                    stock_condition=data["stock_condition"],
+                    reference=data["reference"],
+                    notes=data["notes"],
+                )
 
         except DjangoValidationError as exc:
             detail = (
@@ -334,6 +365,7 @@ class StockMovementListCreateView(GenericAPIView):
             StockMovementSerializer(movement).data,
             status=status.HTTP_201_CREATED,
         )
+
 
 
 # ==================================================

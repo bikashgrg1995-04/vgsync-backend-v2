@@ -129,10 +129,14 @@ class BusinessStockSerializer(serializers.ModelSerializer):
         read_only=True,
     )
 
+    image = serializers.ImageField(read_only=True)
+
     quantity = serializers.SerializerMethodField()
     damaged_quantity = serializers.SerializerMethodField()
     total_quantity = serializers.SerializerMethodField()
     updated_at = serializers.SerializerMethodField()
+
+    stock_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -140,7 +144,16 @@ class BusinessStockSerializer(serializers.ModelSerializer):
             "product_id",
             "stock_no",
             "product_name",
+            "brand",
+            "model",
+            "category",
+            "group",
             "unit",
+            "purchase_price",
+            "sale_price",
+            "mrp",
+            "image",
+            "stock_status",
             "quantity",
             "damaged_quantity",
             "total_quantity",
@@ -179,6 +192,20 @@ class BusinessStockSerializer(serializers.ModelSerializer):
     def get_updated_at(self, obj):
         balance = self.get_balance(obj)
         return balance.updated_at if balance else None
+
+    def get_stock_status(self, obj):
+        balance = getattr(obj, "active_business_balances", [])
+        balance = balance[0] if balance else None
+
+        if not balance:
+            return "out_of_stock"
+
+        quantity = balance.quantity
+
+        if quantity <= 0:
+            return "out_of_stock"
+
+        return "in_stock"
 
 
 # ==================================================
@@ -263,6 +290,11 @@ class StockQuantityField(serializers.Field):
 # STOCK MOVEMENT CREATE
 # ==================================================
 
+
+# ==================================================
+# STOCK MOVEMENT CREATE
+# ==================================================
+
 class StockMovementCreateSerializer(serializers.Serializer):
 
     ALLOWED_MOVEMENT_TYPES = [
@@ -274,6 +306,34 @@ class StockMovementCreateSerializer(serializers.Serializer):
         StockMovement.MovementType.ADJUSTMENT_IN,
         StockMovement.MovementType.ADJUSTMENT_OUT,
     ]
+
+    ADJUSTMENT_ACTIONS = [
+        "increase",
+        "decrease",
+        "remove_damaged",
+    ]
+
+    ADJUSTMENT_REASONS = {
+        "increase": [
+            "received",
+            "found",
+            "count_correction",
+            "other",
+        ],
+        "decrease": [
+            "damaged",
+            "lost",
+            "expired",
+            "used",
+            "count_correction",
+            "other",
+        ],
+        "remove_damaged": [
+            "disposed",
+            "written_off",
+            "other",
+        ],
+    }
 
     product_id = serializers.IntegerField(min_value=1)
 
@@ -301,6 +361,17 @@ class StockMovementCreateSerializer(serializers.Serializer):
         default="",
     )
 
+    # Used only for manual adjustment requests.
+    adjustment_action = serializers.ChoiceField(
+        choices=ADJUSTMENT_ACTIONS,
+        required=False,
+    )
+
+    adjustment_reason = serializers.CharField(
+        required=False,
+        allow_blank=False,
+    )
+
     def validate_product_id(self, value):
         business = self.context["request"].active_business
 
@@ -318,4 +389,72 @@ class StockMovementCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         attrs["product"] = attrs.pop("product_id")
+
+        movement_type = attrs["movement_type"]
+        adjustment_action = attrs.get("adjustment_action")
+        adjustment_reason = attrs.get("adjustment_reason")
+
+        adjustment_types = {
+            StockMovement.MovementType.ADJUSTMENT_IN,
+            StockMovement.MovementType.ADJUSTMENT_OUT,
+        }
+
+        # --------------------------------------------------
+        # MANUAL ADJUSTMENT VALIDATION
+        # --------------------------------------------------
+
+        if movement_type in adjustment_types:
+
+            if not adjustment_action:
+                raise serializers.ValidationError({
+                    "adjustment_action": (
+                        "This field is required for stock adjustments."
+                    )
+                })
+
+            if not adjustment_reason:
+                raise serializers.ValidationError({
+                    "adjustment_reason": (
+                        "Please select an adjustment reason."
+                    )
+                })
+
+            allowed_reasons = self.ADJUSTMENT_REASONS[
+                adjustment_action
+            ]
+
+            if adjustment_reason not in allowed_reasons:
+                raise serializers.ValidationError({
+                    "adjustment_reason": (
+                        "Invalid reason for this adjustment action."
+                    )
+                })
+
+            expected_movement_type = (
+                StockMovement.MovementType.ADJUSTMENT_IN
+                if adjustment_action == "increase"
+                else StockMovement.MovementType.ADJUSTMENT_OUT
+            )
+
+            if movement_type != expected_movement_type:
+                raise serializers.ValidationError({
+                    "movement_type": (
+                        "Movement type does not match adjustment action."
+                    )
+                })
+
+        # --------------------------------------------------
+        # NON-ADJUSTMENT MOVEMENTS
+        # --------------------------------------------------
+
+        else:
+
+            if adjustment_action or adjustment_reason:
+                raise serializers.ValidationError({
+                    "adjustment_action": (
+                        "Adjustment fields are only allowed "
+                        "for adjustment movements."
+                    )
+                })
+
         return attrs

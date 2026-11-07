@@ -12,6 +12,10 @@ from apps.inventory.services.validators import (
 )
 
 
+# ==================================================
+# GENERIC STOCK MOVEMENT TYPES
+# ==================================================
+
 INCREASE_TYPES = {
     StockMovement.MovementType.OPENING,
     StockMovement.MovementType.PURCHASE_RECEIPT,
@@ -27,6 +31,50 @@ DECREASE_TYPES = {
 
 ALLOWED_TYPES = INCREASE_TYPES | DECREASE_TYPES
 
+
+# ==================================================
+# STOCK ADJUSTMENT REASONS
+# ==================================================
+
+ADJUSTMENT_REASONS = {
+    "increase": {
+        "received",
+        "found",
+        "count_correction",
+        "other",
+    },
+    "decrease": {
+        "damaged",
+        "lost",
+        "expired",
+        "used",
+        "count_correction",
+        "other",
+    },
+    "remove_damaged": {
+        "disposed",
+        "written_off",
+        "other",
+    },
+}
+
+ADJUSTMENT_REASON_LABELS = {
+    "received": "Additional stock received",
+    "found": "Previously missing stock found",
+    "count_correction": "Stock count correction",
+    "damaged": "Reclassified as damaged",
+    "lost": "Lost or missing",
+    "expired": "Expired stock",
+    "used": "Used stock",
+    "disposed": "Damaged stock disposed",
+    "written_off": "Damaged stock written off",
+    "other": "Other adjustment",
+}
+
+
+# ==================================================
+# QUANTITY VALIDATION
+# ==================================================
 
 def validate_quantity(value):
     """
@@ -71,6 +119,10 @@ def validate_quantity(value):
     return quantity
 
 
+# ==================================================
+# STOCK CONDITION VALIDATION
+# ==================================================
+
 def validate_stock_condition(stock_condition):
     """
     Validate whether the movement affects good or damaged stock.
@@ -88,6 +140,10 @@ def validate_stock_condition(stock_condition):
 
     return stock_condition
 
+
+# ==================================================
+# GENERIC STOCK MOVEMENT
+# ==================================================
 
 @transaction.atomic
 def create_stock_movement(
@@ -205,3 +261,278 @@ def create_stock_movement(
     )
 
     return movement
+
+
+# ==================================================
+# STOCK ADJUSTMENT
+# ==================================================
+
+@transaction.atomic
+def create_stock_adjustment(
+    *,
+    user,
+    business,
+    product,
+    action,
+    quantity,
+    reason,
+    reference="",
+    notes="",
+):
+    """
+    Apply a manual stock adjustment atomically.
+
+    Actions:
+
+    1. increase
+       Increase good stock.
+
+    2. decrease
+       Decrease good stock.
+       If reason is 'damaged', reclassify good stock
+       into damaged stock.
+
+    3. remove_damaged
+       Remove existing damaged stock.
+
+    Damaged reclassification creates two immutable
+    stock movement records within one transaction.
+    """
+
+    # --------------------------------------------------
+    # VALIDATE ACTION AND REASON
+    # --------------------------------------------------
+
+    if action not in ADJUSTMENT_REASONS:
+        raise ValidationError({
+            "action": "Invalid stock adjustment action."
+        })
+
+    if reason not in ADJUSTMENT_REASONS[action]:
+        raise ValidationError({
+            "reason": "Invalid reason for this adjustment action."
+        })
+
+    quantity = validate_quantity(quantity)
+
+    reference = reference or ""
+    notes = (notes or "").strip()
+
+    # --------------------------------------------------
+    # LOCK AND VALIDATE BUSINESS AND PRODUCT
+    # --------------------------------------------------
+
+    locked_business = (
+        Business.objects.select_for_update()
+        .get(pk=business.pk)
+    )
+
+    locked_product = (
+        Product.objects.select_for_update()
+        .select_related("owner_business")
+        .get(pk=product.pk)
+    )
+
+    validate_inventory_access(
+        user,
+        locked_business,
+        write=True,
+    )
+
+    validate_product_business(
+        locked_product,
+        locked_business,
+    )
+
+    # --------------------------------------------------
+    # GET OR CREATE STOCK BALANCE
+    # --------------------------------------------------
+
+    balance, _ = StockBalance.objects.get_or_create(
+        product=locked_product,
+        business=locked_business,
+        defaults={
+            "quantity": Decimal("0.000"),
+            "damaged_quantity": Decimal("0.000"),
+        },
+    )
+
+    balance = (
+        StockBalance.objects.select_for_update()
+        .get(pk=balance.pk)
+    )
+
+    # --------------------------------------------------
+    # PREPARE MOVEMENT NOTES
+    # --------------------------------------------------
+
+    reason_label = ADJUSTMENT_REASON_LABELS[reason]
+
+    movement_notes = f"Reason: {reason_label}"
+
+    if notes:
+        movement_notes += f"\n{notes}"
+
+    # --------------------------------------------------
+    # ACTION: INCREASE GOOD STOCK
+    # --------------------------------------------------
+
+    if action == "increase":
+
+        before = balance.quantity
+        after = before + quantity
+
+        balance.quantity = after
+
+        balance.save(
+            update_fields=[
+                "quantity",
+                "updated_at",
+            ]
+        )
+
+        return StockMovement.objects.create(
+            stock_balance=balance,
+            stock_condition=StockMovement.StockCondition.GOOD,
+            movement_type=StockMovement.MovementType.ADJUSTMENT_IN,
+            quantity=quantity,
+            balance_before=before,
+            balance_after=after,
+            reference=reference,
+            notes=movement_notes,
+            created_by=user,
+        )
+
+    # --------------------------------------------------
+    # ACTION: REMOVE DAMAGED STOCK
+    # --------------------------------------------------
+
+    if action == "remove_damaged":
+
+        before = balance.damaged_quantity
+
+        if before < quantity:
+            raise ValidationError({
+                "quantity": (
+                    f"Insufficient damaged stock. "
+                    f"Available: {before}"
+                )
+            })
+
+        after = before - quantity
+
+        balance.damaged_quantity = after
+
+        balance.save(
+            update_fields=[
+                "damaged_quantity",
+                "updated_at",
+            ]
+        )
+
+        return StockMovement.objects.create(
+            stock_balance=balance,
+            stock_condition=StockMovement.StockCondition.DAMAGED,
+            movement_type=StockMovement.MovementType.ADJUSTMENT_OUT,
+            quantity=quantity,
+            balance_before=before,
+            balance_after=after,
+            reference=reference,
+            notes=movement_notes,
+            created_by=user,
+        )
+
+    # --------------------------------------------------
+    # ACTION: DECREASE GOOD STOCK
+    # --------------------------------------------------
+
+    good_before = balance.quantity
+
+    if good_before < quantity:
+        raise ValidationError({
+            "quantity": (
+                f"Insufficient good stock. "
+                f"Available: {good_before}"
+            )
+        })
+
+    good_after = good_before - quantity
+
+    # --------------------------------------------------
+    # REASON: DAMAGED
+    #
+    # Reclassify good stock into damaged stock.
+    # Both movements are part of the same transaction.
+    # --------------------------------------------------
+
+    if reason == "damaged":
+
+        damaged_before = balance.damaged_quantity
+        damaged_after = damaged_before + quantity
+
+        # Update both balances together.
+        balance.quantity = good_after
+        balance.damaged_quantity = damaged_after
+
+        balance.save(
+            update_fields=[
+                "quantity",
+                "damaged_quantity",
+                "updated_at",
+            ]
+        )
+
+        # Movement 1: Remove quantity from good stock.
+        good_movement = StockMovement.objects.create(
+            stock_balance=balance,
+            stock_condition=StockMovement.StockCondition.GOOD,
+            movement_type=StockMovement.MovementType.ADJUSTMENT_OUT,
+            quantity=quantity,
+            balance_before=good_before,
+            balance_after=good_after,
+            reference=reference,
+            notes=movement_notes,
+            created_by=user,
+        )
+
+        # Movement 2: Add the same quantity to damaged stock.
+        StockMovement.objects.create(
+            stock_balance=balance,
+            stock_condition=StockMovement.StockCondition.DAMAGED,
+            movement_type=StockMovement.MovementType.ADJUSTMENT_IN,
+            quantity=quantity,
+            balance_before=damaged_before,
+            balance_after=damaged_after,
+            reference=reference,
+            notes=movement_notes,
+            created_by=user,
+        )
+
+        return good_movement
+
+    # --------------------------------------------------
+    # NORMAL DECREASE
+    #
+    # Lost, expired, used, count correction or other.
+    # --------------------------------------------------
+
+    balance.quantity = good_after
+
+    balance.save(
+        update_fields=[
+            "quantity",
+            "updated_at",
+        ]
+    )
+
+    return StockMovement.objects.create(
+        stock_balance=balance,
+        stock_condition=StockMovement.StockCondition.GOOD,
+        movement_type=StockMovement.MovementType.ADJUSTMENT_OUT,
+        quantity=quantity,
+        balance_before=good_before,
+        balance_after=good_after,
+        reference=reference,
+        notes=movement_notes,
+        created_by=user,
+    )
