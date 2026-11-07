@@ -149,6 +149,7 @@ Base path: `/api/v1/auth/`
 | `POST` | `/token/refresh/` | None | Exchange a refresh token for a new access token and a new refresh token |
 | `POST` | `/logout/` | None | Revoke a refresh token |
 | `GET` | `/me/` | Bearer | Current user and active business |
+| `PATCH` | `/me/` | Bearer | Change your own first name, last name, email and phone (role and username cannot be changed) |
 | `POST` | `/change-password/` | Bearer | Change password and sign out everywhere |
 | `POST` | `/forgot-password/` | None | Email a one-time reset link (`business_code`, `username`) |
 | `POST` | `/reset-password/` | None | Set a new password from the link (`uid`, `token`, `new_password`, `confirm_password`) |

@@ -97,6 +97,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
         )
 
 
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    """The few fields a person may change about themselves."""
+
+    class Meta:
+        model = User
+        fields = ("first_name", "last_name", "email", "phone")
+        extra_kwargs = {
+            "first_name": {"required": False, "max_length": 150},
+            "last_name": {"required": False, "max_length": 150},
+        }
+
+    def validate_phone(self, value):
+        value = value.strip()
+
+        if value and not all(c.isdigit() or c in "+- ()" for c in value):
+            raise serializers.ValidationError("Enter a valid phone number.")
+
+        return value
+
+
 class VGSyncTokenObtainPairSerializer(TokenObtainPairSerializer):
     business_code = serializers.CharField(max_length=50)
     username = serializers.CharField(max_length=150)
