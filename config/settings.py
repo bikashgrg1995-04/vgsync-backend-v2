@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "apps.audit.apps.AuditConfig",
     "apps.notifications.apps.NotificationsConfig",
     "apps.finance.apps.FinanceConfig",
+    "apps.support.apps.SupportConfig",
 ]
 
 MIDDLEWARE = [
@@ -187,6 +188,7 @@ REST_FRAMEWORK = {
         "forgot_password_ip": "10/hour",
         "forgot_password_account": "3/hour",
         "reset_password": "20/hour",
+        "support_ticket": "20/hour",
     },
 
     # How many reverse proxies sit in front of the app. With 0 the client IP
@@ -285,3 +287,12 @@ AUTHENTICATION_BACKENDS = [
 SILENCED_SYSTEM_CHECKS = [
     "auth.W004",
 ]
+
+# Help & Support page: how people reach the VGSync team.
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@vgsync.com")
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+977-1-5901234")
+SUPPORT_HOURS = os.getenv("SUPPORT_HOURS", "Mon - Sat, 9AM - 6PM")
+SUPPORT_REPLY_TIME = os.getenv("SUPPORT_REPLY_TIME", "We'll reply within 24 hours")
+# Optional links; the page hides the matching button when one is empty.
+SUPPORT_USER_GUIDE_URL = os.getenv("SUPPORT_USER_GUIDE_URL", "").strip()
+SUPPORT_VIDEO_TUTORIALS_URL = os.getenv("SUPPORT_VIDEO_TUTORIALS_URL", "").strip()

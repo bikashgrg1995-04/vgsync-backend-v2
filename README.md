@@ -44,6 +44,7 @@ apps/
   purchases/         Suppliers, purchases, receiving stock and supplier payments
   sales/             Customers, bikes, sales, EMI, follow-ups, returns and customer payments
   finance/           Expenses and income (salary, supplier and customer payments are added automatically)
+  support/           Help & Support: FAQs and support tickets
 ```
 
 ## Setup
@@ -84,6 +85,8 @@ Read from `.env` in the project root.
 | `CORS_ALLOWED_ORIGINS` | No | empty | Comma-separated frontend origins allowed to call the API from a browser |
 | `REDIS_URL` | Production | empty | Redis URL for the shared cache, for example `redis://localhost:6379/1` (`rediss://` for TLS). Empty uses a per-process in-memory cache |
 | `NUM_PROXIES` | No | `0` | Number of reverse proxies in front of the app (see [Rate limiting](#rate-limiting)) |
+| `SUPPORT_EMAIL`, `SUPPORT_PHONE`, `SUPPORT_HOURS`, `SUPPORT_REPLY_TIME` | No | VGSync defaults | Contact details on the Help & Support page (see [Help & Support API](#help--support-api)) |
+| `SUPPORT_USER_GUIDE_URL`, `SUPPORT_VIDEO_TUTORIALS_URL` | No | empty | Links for the user guide and video tutorials. The page hides the button while one is empty |
 
 Example:
 
@@ -698,6 +701,20 @@ No scheduler is needed: listing makes the business's notifications first, at mos
 
 Every report above, and the customer and supplier statements, can be downloaded by adding `export=xlsx` or `export=pdf` to the same request, for example `GET /reports/profit-loss/?date_from=2026-04-01&export=pdf` or `GET /customers/7/statement/?export=xlsx`. The same filters apply, the response is the file (`Content-Disposition: attachment`, named like `profit-loss-20261104.pdf`), and an unknown value returns `400`. A statement download carries every row, not one page. Excel files have a Summary sheet and one sheet per table, with real numbers (text that looks like a formula is never run). PDFs use DejaVu Sans when it is installed; set `PDF_FONT` and `PDF_FONT_BOLD` in the settings to the paths of other TTF files (for example a Noto Sans Devanagari font) so Nepali names print correctly.
 
+## Help & Support API
+
+Powers the Help & Support page: FAQs, support tickets and how to reach the VGSync team.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/support/faqs/` | Published FAQs in the order set by the team (`id`, `question`, `answer`). `search` looks in the question and the answer |
+| `GET` | `/support/tickets/` | Tickets of the active business, newest first. Filters: `status` (`open`, `in_progress`, `resolved`), `category`; `search` looks in the subject and description |
+| `POST` | `/support/tickets/` | Raise a ticket: `subject` (3+ characters), `description` (10+ characters), optional `category` (`inventory`, `purchase`, `sales`, `payments`, `reports`, `account`, `other`; default `other`) |
+| `GET` | `/support/tickets/{id}/` | One ticket |
+| `GET` | `/support/contact/` | `email`, `phone`, `hours`, `reply_time`, `user_guide_url`, `video_tutorials_url` |
+
+Any signed-in user can use it, with no module permission. The owner, admin and accountant see every ticket of the business; staff see only the ones they raised. Raising a ticket asks for help and changes no business data, so a company owner can do it inside a branch. A ticket always starts as `open`; people cannot change it afterwards. The VGSync team moves it to `in_progress` or `resolved` in Django Admin, where FAQs are also written and reordered. Each ticket has a `reference` such as `TKT-00124`. Raising tickets is limited to 20 per hour per person. The first five FAQs are added by a migration.
+
 ## Expenses API (owner only)
 
 Every payroll payment is recorded as a `salary` expense, and every supplier payment as a `purchase` expense, automatically, so they sit with all other spending. Other expenses are entered by the owner.
@@ -739,4 +756,4 @@ The settings use PostgreSQL, so the database user needs permission to create a t
 
 ## Django Admin
 
-Available at `/admin/` for Super Admin users to manage companies, businesses, users (including creating owners, see [Owner setup and first login](#owner-setup-and-first-login)), and Positions (module permissions are edited inline on each Position). Payroll entries and payments are read-only there; they are changed through the API so every change is validated and attributed.
+Available at `/admin/` for Super Admin users to manage companies, businesses, support FAQs and tickets, users (including creating owners, see [Owner setup and first login](#owner-setup-and-first-login)), and Positions (module permissions are edited inline on each Position). Payroll entries and payments are read-only there; they are changed through the API so every change is validated and attributed.
