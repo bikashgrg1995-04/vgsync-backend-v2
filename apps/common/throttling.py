@@ -87,6 +87,21 @@ class ChangePasswordRateThrottle(SimpleRateThrottle):
         }
 
 
+class SupportTicketRateThrottle(SimpleRateThrottle):
+    """Limits how many support tickets one person can raise."""
+
+    scope = "support_ticket"
+
+    def get_cache_key(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return None
+
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": request.user.pk,
+        }
+
+
 class ForgotPasswordIPRateThrottle(SimpleRateThrottle):
     """Limits password-reset requests from one IP address."""
 
