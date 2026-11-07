@@ -474,6 +474,24 @@ Rules:
 - A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund or adjustment first.
 - Returns, refunds, replacements and adjustments are never edited or deleted.
 
+## Stock orders API (Branch to Head Office)
+
+A Branch orders stock from its Head Office; Head Office dispatches good stock; the Branch checks what arrived (good and damaged apart) and can send damaged stock back with a note; Head Office receives it and reviews it. An order changes no stock until goods move. A business only sees the orders it is part of: a Branch sees its own, Head Office sees those from its branches. Needs the `inventory` module permission, and full access to the business (a company owner viewing a branch is read-only).
+
+| Method | Path | Who | Description |
+| --- | --- | --- | --- |
+| `GET` | `/inventory/transfers/` | both | List. Filters: `status` (comma separated), `search` (reference, notes, product) |
+| `POST` | `/inventory/transfers/` | Branch | Place an order: `{"items": [{"product": 3, "quantity": "10"}], "notes": ""}`. The reference (`ORD-<branch code>-0001`) is made by the server |
+| `GET` | `/inventory/transfers/{id}/` | both | Items with ordered, dispatched, to receive, received good/damaged and damaged still to return; plus the history of dispatches, receipts, returns, return receipts and reviews |
+| `POST` | `/inventory/transfers/{id}/cancel/` | both | `{"reason": "..."}`. Only before anything is dispatched |
+| `POST` | `/inventory/transfers/{id}/dispatch/` | Head Office | `{"items": [{"transfer_item": 1, "quantity": "6"}], "notes": ""}`. Good stock only; partial and repeated dispatches are fine; never more than ordered |
+| `POST` | `/inventory/transfers/{id}/receive/` | Branch | `{"items": [{"transfer_item": 1, "good_quantity": "5", "damaged_quantity": "1"}]}`. Good goes to good stock, damaged to damaged stock |
+| `POST` | `/inventory/transfers/{id}/return/` | Branch | Send damaged stock back: items as for dispatch, and `notes` (the reason) is required |
+| `POST` | `/inventory/transfers/{id}/returns/{batch}/receive/` | Head Office | `{"items": [{"return_item": 1, "received_quantity": "1"}]}`. The whole returned quantity must be received |
+| `POST` | `/inventory/transfers/{id}/returns/{batch}/review/` | Head Office | `{"items": [{"receipt_item": 1, "accepted_quantity": "1", "rejected_quantity": "0"}], "remarks": "..."}`. The decision (accepted, partially accepted, rejected) is worked out from the quantities. A review changes no stock |
+
+Statuses: `ordered`, `partially_dispatched`, `dispatched`, `partially_received`, `received`, `cancelled`. Every action answers with the order in full.
+
 ## Sales API
 
 Selling stock to customers, for the active business. It needs the `sales` module permission (owner, admin and accountant have it by role; staff need it on their Position). Writes need full access to the business, so a company owner is read-only inside a branch. Money is sent and returned as strings.
