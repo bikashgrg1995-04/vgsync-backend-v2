@@ -59,3 +59,36 @@ def username_taken(business, username):
         )
 
     return users.exists()
+
+
+_FLAGS = ("can_view", "can_create", "can_update", "can_delete")
+
+
+def _grants(position):
+    return {
+        item.module: {flag for flag in _FLAGS if getattr(item, flag)}
+        for item in position.permissions.all()
+    }
+
+
+def manageable_position_ids(actor, business):
+    """
+    Positions a non-owner may assign (and whose holders they may manage):
+    those that grant nothing the actor's own position does not. This stops a
+    delegated administrator from handing out, or taking over, more access
+    than they have themselves.
+    """
+    own = {}
+
+    if actor.position_id and actor.position.is_active:
+        own = _grants(actor.position)
+
+    allowed = []
+
+    for position in scoped_positions(business).prefetch_related("permissions"):
+        wanted = _grants(position)
+
+        if all(flags <= own.get(module, set()) for module, flags in wanted.items()):
+            allowed.append(position.pk)
+
+    return allowed

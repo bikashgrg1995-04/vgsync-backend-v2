@@ -184,6 +184,9 @@ REST_FRAMEWORK = {
         "login_account": "5/minute",
         "token_ip": "60/minute",
         "change_password": "10/hour",
+        "forgot_password_ip": "10/hour",
+        "forgot_password_account": "3/hour",
+        "reset_password": "20/hour",
     },
 
     # How many reverse proxies sit in front of the app. With 0 the client IP
@@ -232,6 +235,27 @@ else:
             "LOCATION": "vgsync-default",
         }
     }
+
+
+# Password reset
+# The reset link in the email points at the frontend, which then calls
+# POST /api/v1/auth/reset-password/. Links are single-use (the token is tied
+# to the current password hash) and expire after PASSWORD_RESET_TIMEOUT.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:4321").rstrip("/")
+PASSWORD_RESET_TIMEOUT = int(os.getenv("PASSWORD_RESET_TIMEOUT", "3600"))
+
+# Email: prints emails to the console unless EMAIL_HOST is configured.
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "VGSync <no-reply@vgsync.local>")
+EMAIL_BACKEND = (
+    "django.core.mail.backends.smtp.EmailBackend"
+    if EMAIL_HOST
+    else "django.core.mail.backends.console.EmailBackend"
+)
 
 
 # CORS

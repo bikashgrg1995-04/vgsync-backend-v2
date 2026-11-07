@@ -47,6 +47,54 @@ class IsOwner(BasePermission):
         return getattr(request, "access_mode", None) == "full"
 
 
+class CanManageTeam(BasePermission):
+    """
+    Who may use the team (staff) API: the owner, and staff whose Position
+    grants the "staff" module (the "Administration" position).
+
+    The owner follows ``IsOwner`` (read-only for a company owner inside a
+    Branch). A position holder needs the matching View/Create/Update/Delete
+    right. Users with the admin or accountant role are not included: team
+    management is delegated through Positions, not roles.
+    """
+
+    message = "You do not have permission to manage the team."
+
+    ACTION_FIELDS = {
+        "GET": "can_view",
+        "HEAD": "can_view",
+        "POST": "can_create",
+        "PUT": "can_update",
+        "PATCH": "can_update",
+        "DELETE": "can_delete",
+    }
+
+    def has_permission(self, request, view):
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        if request.method == "OPTIONS":
+            return True
+
+        if user.role == User.Role.OWNER:
+            return IsOwner().has_permission(request, view)
+
+        if user.role != User.Role.STAFF:
+            return False
+
+        field = self.ACTION_FIELDS.get(request.method)
+
+        if not field:
+            return False
+
+        return HasModulePermission._has_position_permission(
+            user, "staff", field
+        )
+
+
 class HasModulePermission(BasePermission):
     """
     Enforces role-based and Position-based module permissions.

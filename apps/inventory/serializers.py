@@ -34,6 +34,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "mrp",
             "purchase_price",
             "sale_price",
+            "reorder_level",
             "image",
             "is_active",
             "created_at",
@@ -46,6 +47,12 @@ class ProductSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        extra_kwargs = {
+            "mrp": {"min_value": 0},
+            "purchase_price": {"min_value": 0},
+            "sale_price": {"min_value": 0},
+            "reorder_level": {"min_value": 0},
+        }
 
     def validate_stock_no(self, value):
         business = self.context["request"].active_business
@@ -134,6 +141,7 @@ class BusinessStockSerializer(serializers.ModelSerializer):
     quantity = serializers.SerializerMethodField()
     damaged_quantity = serializers.SerializerMethodField()
     total_quantity = serializers.SerializerMethodField()
+    stock_status = serializers.SerializerMethodField()
     updated_at = serializers.SerializerMethodField()
 
     stock_status = serializers.SerializerMethodField()
@@ -152,7 +160,7 @@ class BusinessStockSerializer(serializers.ModelSerializer):
             "purchase_price",
             "sale_price",
             "mrp",
-            "image",
+            "reorder_level",
             "stock_status",
             "quantity",
             "damaged_quantity",
@@ -188,6 +196,17 @@ class BusinessStockSerializer(serializers.ModelSerializer):
             if balance
             else "0.000"
         )
+
+    def get_stock_status(self, obj):
+        """out (nothing good on hand), low (at/below reorder level) or in_stock."""
+        balance = self.get_balance(obj)
+        good = balance.quantity if balance else 0
+
+        if good <= 0:
+            return "out"
+        if obj.reorder_level > 0 and good <= obj.reorder_level:
+            return "low"
+        return "in_stock"
 
     def get_updated_at(self, obj):
         balance = self.get_balance(obj)

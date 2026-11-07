@@ -36,6 +36,9 @@ class Product(models.Model):
     purchase_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     sale_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
+    # Stock at or below this level is shown as "low". 0 means no alert.
+    reorder_level = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+
     image = models.FileField(
         upload_to="inventory/products/",
         blank=True,
@@ -64,6 +67,10 @@ class Product(models.Model):
             models.CheckConstraint(
                 condition=Q(sale_price__gte=0),
                 name="product_sale_price_non_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(reorder_level__gte=0),
+                name="product_reorder_level_non_negative",
             ),
         ]
 

@@ -149,7 +149,14 @@ Base path: `/api/v1/auth/`
 | `POST` | `/token/refresh/` | None | Exchange a refresh token for a new access token and a new refresh token |
 | `POST` | `/logout/` | None | Revoke a refresh token |
 | `GET` | `/me/` | Bearer | Current user and active business |
+| `PATCH` | `/me/` | Bearer | Change your own first name, last name, email and phone (role and username cannot be changed) |
 | `POST` | `/change-password/` | Bearer | Change password and sign out everywhere |
+| `POST` | `/forgot-password/` | None | Email a one-time reset link (`business_code`, `username`) |
+| `POST` | `/reset-password/` | None | Set a new password from the link (`uid`, `token`, `new_password`, `confirm_password`) |
+
+### Forgot and reset password
+
+`/forgot-password/` always returns the same `200` message, whether or not the account exists or has an email, so it cannot be used to find usernames. When the account has an email, the mail contains `FRONTEND_URL/reset-password?uid=...&token=...`. The link is valid for `PASSWORD_RESET_TIMEOUT` seconds (default 3600) and works once. Resetting clears `must_change_password` and signs the user out everywhere. With `EMAIL_HOST` empty, emails are printed to the server console (development).
 
 ### Login
 
@@ -214,6 +221,9 @@ Auth endpoints are rate limited. Exceeding a limit returns `429` with a `Retry-A
 | `/login/` | 5 per minute | business code + username (any IP) |
 | `/token/refresh/`, `/logout/` | 60 per minute | IP address |
 | `/change-password/` | 10 per hour | user |
+| `/forgot-password/` | 10 per hour | IP address |
+| `/forgot-password/` | 3 per hour | business code + username |
+| `/reset-password/` | 20 per hour | IP address |
 
 Rates are set in `REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]` in `config/settings.py`. Successful logins count toward the limits too.
 
@@ -232,20 +242,20 @@ Two things to configure for production:
 
 Owners cannot be created, edited or deleted through the API. Only Django Admin does that.
 
-## Company and business API (owner only)
+## Company and business API (read only)
+
+Companies, Head Offices, Branches and independent businesses are created, edited, switched off and switched on **only by a super admin in Django Admin**. Owners can read them and nothing else. This is how access follows registration and payment: when a business has not registered or paid, the super admin sets `is_active` off on the Company or Business, and its users can no longer sign in, refresh a token or switch to it. Switching it back on restores access, and no data is deleted.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET`, `PATCH` | `/company/` | View or rename the owner's company (the code is fixed) |
-| `GET`, `POST` | `/businesses/` | List the Head Office and Branches (filters: `business_type`, `is_active`, `search`), or add a Branch |
-| `GET`, `PATCH` | `/businesses/{id}/` | View or edit name, address, phone, email |
-| `POST` | `/businesses/{id}/deactivate/` | Switch a Branch off: its users can no longer sign in or switch to it |
-| `POST` | `/businesses/{id}/activate/` | Switch it back on |
+| `GET` | `/company/` | The owner's company (`409 no_company` for an independent business) |
+| `GET` | `/businesses/` | List the Head Office and Branches (filters: `business_type`, `is_active`, `search`) |
+| `GET` | `/businesses/{id}/` | One business |
 | `GET` | `/businesses/branches/` | Branch list used by the business switcher |
 
-- A company owner adds Branches from the **Head Office** (`409 not_head_office` otherwise) and cannot write from inside a Branch (read-only). The Branch's type, company and parent are set by the server; `business_code` is made upper case, must be unique (ignoring case) and cannot change afterwards.
-- An independent owner sees and edits only their own business, cannot add Branches, and has no company (`409 no_company`).
-- Businesses are never deleted. The Head Office cannot be deactivated. Companies, Head Offices, owners and independent businesses are still created in Django Admin.
+- Writes to `/company/` and `/businesses/` return `405`.
+- A company owner sees the whole company; an independent owner sees only their own business.
+- To add a branch: Django Admin, Businesses, add one with type `branch`, the company, the Head Office as parent and a unique code.
 
 ## Team management API (owner only)
 
@@ -258,6 +268,8 @@ Everything below is limited to the **owner** of the active business, and works o
 Admins, accountants and staff get `403`. Records of another company or business return `404`.
 
 ### Staff
+
+**Who can use the team and Positions APIs.** The owner can do everything. Staff whose Position grants the `staff` module (the "Administration" position) can manage other **staff** accounts with the matching View/Create/Update/Delete right, and can read Positions. They cannot: manage themselves, create or change Positions, manage admin/accountant accounts, or assign or manage anyone with a Position that grants more than their own. Admin and accountant roles get no team access. `/auth/me/` and the login response now include `permissions` and `can_manage_team` so screens can hide what a person cannot use.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -463,6 +475,24 @@ Rules:
 - A return whose credit was already used cannot be voided (`409`, `credit_in_use`); void the refund or adjustment first.
 - Returns, refunds, replacements and adjustments are never edited or deleted.
 
+## Stock orders API (Branch to Head Office)
+
+A Branch orders stock from its Head Office; Head Office dispatches good stock; the Branch checks what arrived (good and damaged apart) and can send damaged stock back with a note; Head Office receives it and reviews it. An order changes no stock until goods move. A business only sees the orders it is part of: a Branch sees its own, Head Office sees those from its branches. Needs the `inventory` module permission, and full access to the business (a company owner viewing a branch is read-only).
+
+| Method | Path | Who | Description |
+| --- | --- | --- | --- |
+| `GET` | `/inventory/transfers/` | both | List. Filters: `status` (comma separated), `search` (reference, notes, product) |
+| `POST` | `/inventory/transfers/` | Branch | Place an order: `{"items": [{"product": 3, "quantity": "10"}], "notes": ""}`. The reference (`ORD-<branch code>-0001`) is made by the server |
+| `GET` | `/inventory/transfers/{id}/` | both | Items with ordered, dispatched, to receive, received good/damaged and damaged still to return; plus the history of dispatches, receipts, returns, return receipts and reviews |
+| `POST` | `/inventory/transfers/{id}/cancel/` | both | `{"reason": "..."}`. Only before anything is dispatched |
+| `POST` | `/inventory/transfers/{id}/dispatch/` | Head Office | `{"items": [{"transfer_item": 1, "quantity": "6"}], "notes": ""}`. Good stock only; partial and repeated dispatches are fine; never more than ordered |
+| `POST` | `/inventory/transfers/{id}/receive/` | Branch | `{"items": [{"transfer_item": 1, "good_quantity": "5", "damaged_quantity": "1"}]}`. Good goes to good stock, damaged to damaged stock |
+| `POST` | `/inventory/transfers/{id}/return/` | Branch | Send damaged stock back: items as for dispatch, and `notes` (the reason) is required |
+| `POST` | `/inventory/transfers/{id}/returns/{batch}/receive/` | Head Office | `{"items": [{"return_item": 1, "received_quantity": "1"}]}`. The whole returned quantity must be received |
+| `POST` | `/inventory/transfers/{id}/returns/{batch}/review/` | Head Office | `{"items": [{"receipt_item": 1, "accepted_quantity": "1", "rejected_quantity": "0"}], "remarks": "..."}`. The decision (accepted, partially accepted, rejected) is worked out from the quantities. A review changes no stock |
+
+Statuses: `ordered`, `partially_dispatched`, `dispatched`, `partially_received`, `received`, `cancelled`. Every action answers with the order in full.
+
 ## Sales API
 
 Selling stock to customers, for the active business. It needs the `sales` module permission (owner, admin and accountant have it by role; staff need it on their Position). Writes need full access to the business, so a company owner is read-only inside a branch. Money is sent and returned as strings.
@@ -605,6 +635,8 @@ Customers and suppliers are parties of their own business. Every purchase, purch
 | --- | --- | --- |
 | `GET`, `POST` | `/customers/` | List or add customers (profile includes what they owe and the credit you owe them) |
 | `GET`, `PATCH`, `DELETE` | `/customers/{id}/` | View, edit or deactivate a customer |
+
+A customer has a `customer_type` (`individual`, `business` or `fleet`; filter with `?customer_type=`) and a `credit_limit` (0 = none set). `over_credit_limit` is true when what the customer owes is above the limit. It is a warning only; a sale is never blocked by it. Phone, email and PAN are optional, but a phone number is unique within a business. `?has_dues=true` lists only customers who still owe money.
 | `GET` | `/customers/{id}/statement/` | Full history: sales, payments, returns, credit use and refunds |
 | `GET`, `POST` | `/suppliers/` | List or add suppliers (profile includes outstanding, advance, credit to pay and credit to receive) |
 | `GET`, `PATCH`, `DELETE` | `/suppliers/{id}/` | View, edit or deactivate a supplier |

@@ -23,12 +23,27 @@ ZERO = Decimal("0.00")
 class Customer(models.Model):
     """Someone a business sells to. Customers belong to one business."""
 
+    class CustomerType(models.TextChoices):
+        INDIVIDUAL = "individual", "Individual"
+        BUSINESS = "business", "Business"
+        FLEET = "fleet", "Fleet"
+
     business = models.ForeignKey(
         "businesses.Business",
         on_delete=models.PROTECT,
         related_name="customers",
     )
     name = models.CharField(max_length=200)
+    customer_type = models.CharField(
+        max_length=20,
+        choices=CustomerType.choices,
+        default=CustomerType.INDIVIDUAL,
+    )
+    # How much the customer may owe at one time. 0 means no limit is set.
+    # It only warns (see ``over_credit_limit``); it never blocks a sale.
+    credit_limit = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0
+    )
     phone = models.CharField(max_length=30, blank=True)
     email = models.EmailField(blank=True)
     address = models.CharField(max_length=255, blank=True)
@@ -49,6 +64,10 @@ class Customer(models.Model):
                 fields=["business", "phone"],
                 condition=~Q(phone=""),
                 name="unique_customer_phone_per_business",
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_limit__gte=0),
+                name="customer_credit_limit_not_negative",
             ),
         ]
 

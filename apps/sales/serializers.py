@@ -61,12 +61,18 @@ class CustomerSerializer(serializers.ModelSerializer):
     stock_to_give = serializers.DecimalField(
         max_digits=14, decimal_places=3, read_only=True, default=Decimal("0")
     )
+    # True when the customer owes more than their credit limit. A warning
+    # only: sales are never blocked by it. Always false when no limit is set.
+    over_credit_limit = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
         fields = (
             "id",
             "name",
+            "customer_type",
+            "credit_limit",
+            "over_credit_limit",
             "phone",
             "email",
             "address",
@@ -88,6 +94,19 @@ class CustomerSerializer(serializers.ModelSerializer):
 
         if not value:
             raise serializers.ValidationError("This field may not be blank.")
+
+        return value
+
+    def get_over_credit_limit(self, obj):
+        owed = getattr(obj, "credit_to_receive", None) or Decimal("0")
+
+        return obj.credit_limit > 0 and owed > obj.credit_limit
+
+    def validate_credit_limit(self, value):
+        if value < 0:
+            raise serializers.ValidationError(
+                "The credit limit cannot be negative."
+            )
 
         return value
 

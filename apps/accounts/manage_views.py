@@ -1,8 +1,11 @@
 """
-Owner-only APIs to manage the team and its Positions.
+APIs to manage the team and its Positions.
 
-Everything is scoped to the active business (see ``scope.py``) and is
-available only to the owner (``IsOwner``). A user who still has to change
+Everything is scoped to the active business (see ``scope.py``). The owner
+can do everything. Staff whose Position grants the "staff" module (the
+"Administration" position) can manage other staff accounts, but only staff
+accounts whose position grants no more than their own, never themselves,
+and they cannot create positions (they may read the ones they can assign). A user who still has to change
 their password is blocked from these endpoints by the authentication class
 like every other API.
 """
@@ -15,7 +18,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.common.exceptions import Conflict
-from apps.common.permissions import IsOwner
+from apps.common.permissions import CanManageTeam, IsOwner
 
 from .manage_serializers import (
     PositionSerializer,
@@ -26,7 +29,7 @@ from .manage_serializers import (
     generate_temporary_password,
 )
 from .models import PositionPermission, User
-from .scope import scoped_positions, scoped_users
+from .scope import manageable_position_ids, scoped_positions, scoped_users
 from .tokens import revoke_all_refresh_tokens
 
 
@@ -39,7 +42,7 @@ class StaffViewSet(viewsets.ModelViewSet):
     ``reactivate`` to bring them back.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [CanManageTeam]
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     filterset_fields = ("role", "is_active", "position")
@@ -48,8 +51,23 @@ class StaffViewSet(viewsets.ModelViewSet):
     ordering = ("username",)
 
     def get_queryset(self):
-        return scoped_users(self.request.active_business).select_related(
-            "position"
+        business = self.request.active_business
+        user = self.request.user
+
+        queryset = scoped_users(business).select_related("position")
+
+        if user.role == User.Role.OWNER:
+            return queryset
+
+        # A delegated administrator manages staff accounts only: not
+        # themselves, and not anyone with more access than they have.
+        allowed = manageable_position_ids(user, business)
+
+        return (
+            queryset
+            .filter(role=User.Role.STAFF)
+            .exclude(pk=user.pk)
+            .filter(Q(position_id__in=allowed) | Q(position__isnull=True))
         )
 
     def get_serializer_class(self):
@@ -180,9 +198,16 @@ class PositionViewSet(viewsets.ModelViewSet):
     grants. Staff are assigned a Position through the staff API.
     """
 
-    permission_classes = [IsOwner]
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
     serializer_class = PositionSerializer
+
+    def get_permissions(self):
+        # Reading is shared with delegated administrators (they need the list
+        # to assign positions); changing positions stays with the owner.
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [CanManageTeam()]
+
+        return [IsOwner()]
 
     filterset_fields = ("is_active",)
     search_fields = ("name", "description")
@@ -190,12 +215,19 @@ class PositionViewSet(viewsets.ModelViewSet):
     ordering = ("name",)
 
     def get_queryset(self):
-        return (
-            scoped_positions(self.request.active_business)
-            .prefetch_related("permissions")
-            .annotate(
-                staff_count=Count("users", filter=Q(users__is_active=True))
+        business = self.request.active_business
+        user = self.request.user
+
+        queryset = scoped_positions(business)
+
+        if user.role != User.Role.OWNER:
+            # Only positions they could assign anyway.
+            queryset = queryset.filter(
+                pk__in=manageable_position_ids(user, business)
             )
+
+        return queryset.prefetch_related("permissions").annotate(
+            staff_count=Count("users", filter=Q(users__is_active=True))
         )
 
     def destroy(self, request, *args, **kwargs):

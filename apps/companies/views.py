@@ -9,8 +9,8 @@ from .serializers import CompanySerializer
 
 class CompanyView(APIView):
     """
-    The owner's own company: view it, or rename it. The code is fixed and a
-    company is created, deactivated or removed only in Django Admin.
+    The owner's own company, for reading only. A company is created, renamed,
+    switched off or removed only by a super admin in Django Admin.
     """
 
     permission_classes = [IsOwner]
@@ -28,12 +28,3 @@ class CompanyView(APIView):
 
     def get(self, request):
         return Response(CompanySerializer(self._company(request)).data)
-
-    def patch(self, request):
-        company = self._company(request)
-
-        serializer = CompanySerializer(company, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-
-        return Response(serializer.data)
