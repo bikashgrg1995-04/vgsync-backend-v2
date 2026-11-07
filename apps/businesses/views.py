@@ -1,12 +1,10 @@
 
 from rest_framework import status, viewsets
-from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import User
-from apps.common.exceptions import Conflict
 from apps.common.permissions import HasActiveBusinessContext, IsOwner
 
 from .models import Business
@@ -64,21 +62,18 @@ class BranchListView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-class BusinessViewSet(viewsets.ModelViewSet):
+class BusinessViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    The businesses of the owner's tenant.
+    The businesses of the owner's tenant, for reading only.
 
-    A company owner sees the Head Office and every Branch, and can add a
-    Branch (from the Head Office), edit businesses, and deactivate or
-    reactivate a Branch. An independent owner sees only their own business
-    and can edit it. A business is never deleted, and its code never
-    changes. Writes need full access, so a company owner makes them from
-    the Head Office, not from inside a Branch.
+    A company owner sees the Head Office and every Branch. An independent
+    owner sees only their own business. Businesses are created, edited,
+    switched off (for example when a subscription is not paid) and switched
+    on again only by a super admin in Django Admin. Nobody changes them here.
     """
 
     permission_classes = [IsOwner]
     serializer_class = BusinessSerializer
-    http_method_names = ["get", "post", "patch", "head", "options"]
 
     filterset_fields = ("business_type", "is_active")
     search_fields = ("name", "business_code")
@@ -94,66 +89,3 @@ class BusinessViewSet(viewsets.ModelViewSet):
             ).select_related("parent_business")
 
         return Business.objects.filter(pk=business.pk)
-
-    def create(self, request, *args, **kwargs):
-        head_office = request.active_business
-
-        if head_office.business_type != Business.BusinessType.HEAD_OFFICE:
-            raise Conflict(
-                "Branches are added by a company from its Head Office.",
-                code="not_head_office",
-            )
-
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        branch = serializer.save(
-            business_type=Business.BusinessType.BRANCH,
-            company=head_office.company,
-            parent_business=head_office,
-            created_by=request.user,
-        )
-
-        return Response(
-            self.get_serializer(branch).data, status=status.HTTP_201_CREATED
-        )
-
-    @action(detail=True, methods=["post"])
-    def deactivate(self, request, pk=None):
-        branch = self.get_object()
-
-        if branch.business_type != Business.BusinessType.BRANCH:
-            raise Conflict(
-                "Only a branch can be deactivated here.", code="not_a_branch"
-            )
-
-        if branch.pk == request.active_business.pk:
-            raise Conflict(
-                "Switch to the Head Office to deactivate this branch.",
-                code="active_business",
-            )
-
-        if not branch.is_active:
-            raise Conflict("This branch is already inactive.", code="invalid_status")
-
-        branch.is_active = False
-        branch.save(update_fields=["is_active"])
-
-        return Response(self.get_serializer(branch).data)
-
-    @action(detail=True, methods=["post"])
-    def activate(self, request, pk=None):
-        branch = self.get_object()
-
-        if branch.business_type != Business.BusinessType.BRANCH:
-            raise Conflict(
-                "Only a branch can be activated here.", code="not_a_branch"
-            )
-
-        if branch.is_active:
-            raise Conflict("This branch is already active.", code="invalid_status")
-
-        branch.is_active = True
-        branch.save(update_fields=["is_active"])
-
-        return Response(self.get_serializer(branch).data)

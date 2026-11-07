@@ -242,20 +242,20 @@ Two things to configure for production:
 
 Owners cannot be created, edited or deleted through the API. Only Django Admin does that.
 
-## Company and business API (owner only)
+## Company and business API (read only)
+
+Companies, Head Offices, Branches and independent businesses are created, edited, switched off and switched on **only by a super admin in Django Admin**. Owners can read them and nothing else. This is how access follows registration and payment: when a business has not registered or paid, the super admin sets `is_active` off on the Company or Business, and its users can no longer sign in, refresh a token or switch to it. Switching it back on restores access, and no data is deleted.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET`, `PATCH` | `/company/` | View or rename the owner's company (the code is fixed) |
-| `GET`, `POST` | `/businesses/` | List the Head Office and Branches (filters: `business_type`, `is_active`, `search`), or add a Branch |
-| `GET`, `PATCH` | `/businesses/{id}/` | View or edit name, address, phone, email |
-| `POST` | `/businesses/{id}/deactivate/` | Switch a Branch off: its users can no longer sign in or switch to it |
-| `POST` | `/businesses/{id}/activate/` | Switch it back on |
+| `GET` | `/company/` | The owner's company (`409 no_company` for an independent business) |
+| `GET` | `/businesses/` | List the Head Office and Branches (filters: `business_type`, `is_active`, `search`) |
+| `GET` | `/businesses/{id}/` | One business |
 | `GET` | `/businesses/branches/` | Branch list used by the business switcher |
 
-- A company owner adds Branches from the **Head Office** (`409 not_head_office` otherwise) and cannot write from inside a Branch (read-only). The Branch's type, company and parent are set by the server; `business_code` is made upper case, must be unique (ignoring case) and cannot change afterwards.
-- An independent owner sees and edits only their own business, cannot add Branches, and has no company (`409 no_company`).
-- Businesses are never deleted. The Head Office cannot be deactivated. Companies, Head Offices, owners and independent businesses are still created in Django Admin.
+- Writes to `/company/` and `/businesses/` return `405`.
+- A company owner sees the whole company; an independent owner sees only their own business.
+- To add a branch: Django Admin, Businesses, add one with type `branch`, the company, the Head Office as parent and a unique code.
 
 ## Team management API (owner only)
 

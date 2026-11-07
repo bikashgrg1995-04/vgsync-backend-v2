@@ -176,16 +176,6 @@ class WhatIsRecordedTests(AuditTestCase):
         self.assertGreater(AuditLog.objects.count(), 0)
         self.assertGreaterEqual(AuditLog.objects.count(), before)
 
-    def test_business_changes_are_logged_under_that_business(self):
-        self.client.patch(
-            f"/api/v1/businesses/{self.branch.pk}/", {"phone": "01-555"}, format="json"
-        )
-
-        row = AuditLog.objects.get(model="businesses.business")
-
-        self.assertEqual(row.business, self.branch)
-        self.assertEqual(row.changes, {"phone": ["", "01-555"]})
-
 
 class ReadingTheLogTests(AuditTestCase):
     def setUp(self):
