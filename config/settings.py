@@ -289,8 +289,8 @@ SILENCED_SYSTEM_CHECKS = [
 ]
 
 # Help & Support page: how people reach the VGSync team.
-SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "support@vgsync.com")
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+977-1-5901234")
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "bikashgurung.official.com")
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+977-9842608885")
 SUPPORT_HOURS = os.getenv("SUPPORT_HOURS", "Mon - Sat, 9AM - 6PM")
 SUPPORT_REPLY_TIME = os.getenv("SUPPORT_REPLY_TIME", "We'll reply within 24 hours")
 # Optional links; the page hides the matching button when one is empty.
