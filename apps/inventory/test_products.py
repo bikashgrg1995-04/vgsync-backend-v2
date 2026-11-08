@@ -197,6 +197,65 @@ class ProductAPITests(APITestCase):
             "Updated Product",
         )
 
+    def test_owner_can_upload_and_remove_product_image(self):
+        import shutil
+        import tempfile
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        media_root = tempfile.mkdtemp()
+
+        try:
+            with override_settings(MEDIA_ROOT=media_root):
+                self.create_user(
+                    "product-image-owner",
+                    role=User.Role.OWNER,
+                    company=self.company,
+                )
+                self.login("product-image-owner", "PRODUCT-HO")
+
+                url = f"{self.list_url}{self.head_office_product.pk}/"
+
+                # 1x1 transparent GIF
+                gif = (
+                    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00"
+                    b"\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00"
+                    b"\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+                )
+
+                response = self.client.patch(
+                    url,
+                    {
+                        "name": "With Image",
+                        "image": SimpleUploadedFile(
+                            "part.gif",
+                            gif,
+                            content_type="image/gif",
+                        ),
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertTrue(response.data["image"])
+
+                self.head_office_product.refresh_from_db()
+                self.assertTrue(self.head_office_product.image)
+
+                # An empty image value clears the picture.
+                response = self.client.patch(
+                    url,
+                    {"image": ""},
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, 200, response.data)
+
+                self.head_office_product.refresh_from_db()
+                self.assertFalse(self.head_office_product.image)
+        finally:
+            shutil.rmtree(media_root, ignore_errors=True)
+
     # --------------------------------------------------
     # BRANCH SHARED CATALOG
     # --------------------------------------------------
