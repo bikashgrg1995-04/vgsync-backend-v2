@@ -144,8 +144,6 @@ class BusinessStockSerializer(serializers.ModelSerializer):
     stock_status = serializers.SerializerMethodField()
     updated_at = serializers.SerializerMethodField()
 
-    stock_status = serializers.SerializerMethodField()
-
     class Meta:
         model = Product
         fields = [
@@ -161,6 +159,8 @@ class BusinessStockSerializer(serializers.ModelSerializer):
             "sale_price",
             "mrp",
             "reorder_level",
+            "description",
+            "image",
             "stock_status",
             "quantity",
             "damaged_quantity",
@@ -211,20 +211,6 @@ class BusinessStockSerializer(serializers.ModelSerializer):
     def get_updated_at(self, obj):
         balance = self.get_balance(obj)
         return balance.updated_at if balance else None
-
-    def get_stock_status(self, obj):
-        balance = getattr(obj, "active_business_balances", [])
-        balance = balance[0] if balance else None
-
-        if not balance:
-            return "out_of_stock"
-
-        quantity = balance.quantity
-
-        if quantity <= 0:
-            return "out_of_stock"
-
-        return "in_stock"
 
 
 # ==================================================
