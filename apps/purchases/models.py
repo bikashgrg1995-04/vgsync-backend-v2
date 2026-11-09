@@ -264,6 +264,11 @@ class PurchaseReceiptItem(models.Model):
         related_name="receipt_items",
     )
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    # Part of ``quantity`` that arrived damaged. It goes to damaged stock;
+    # the rest goes to good stock. Both count as delivered by the supplier.
+    damaged_quantity = models.DecimalField(
+        max_digits=14, decimal_places=3, default=0
+    )
 
     class Meta:
         ordering = ["id"]
@@ -271,6 +276,11 @@ class PurchaseReceiptItem(models.Model):
             models.CheckConstraint(
                 condition=Q(quantity__gt=0),
                 name="purchase_receipt_item_quantity_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(damaged_quantity__gte=0)
+                & Q(damaged_quantity__lte=models.F("quantity")),
+                name="purchase_receipt_item_damaged_within_quantity",
             ),
             models.UniqueConstraint(
                 fields=["receipt", "purchase_item"],

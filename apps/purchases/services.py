@@ -262,8 +262,10 @@ def receive_purchase(*, purchase, user, items=None, received_on=None, notes=""):
     """
     Goods have arrived: add them to the business's stock.
 
-    ``items`` is ``[{"purchase_item", "quantity"}]`` for a part delivery; with
-    no ``items`` everything still to come is received. Each call is one
+    ``items`` is ``[{"purchase_item", "quantity", "damaged_quantity"}]`` for a
+    part delivery; with no ``items`` everything still to come is received in
+    good condition. ``damaged_quantity`` (optional) is the part of ``quantity``
+    that arrived damaged: it goes to damaged stock, the rest to good stock. Each call is one
     delivery (a ``PurchaseReceipt``). Once every line is fully received the
     purchase is ``received``; until then it is ``partial``. If any line
     cannot be received nothing is changed.
@@ -286,7 +288,7 @@ def receive_purchase(*, purchase, user, items=None, received_on=None, notes=""):
 
     if items is None:
         wanted = [
-            (item, item.quantity - item.received_quantity)
+            (item, item.quantity - item.received_quantity, Decimal("0"))
             for item in lines.values()
             if item.quantity > item.received_quantity
         ]
@@ -319,7 +321,17 @@ def receive_purchase(*, purchase, user, items=None, received_on=None, notes=""):
                     )
                 })
 
-            wanted.append((item, entry["quantity"]))
+            damaged = entry.get("damaged_quantity", Decimal("0"))
+
+            if damaged > entry["quantity"]:
+                raise serializers.ValidationError({
+                    "items": (
+                        f"{item.product.name}: damaged cannot be more than "
+                        f"the quantity received."
+                    )
+                })
+
+            wanted.append((item, entry["quantity"], damaged))
 
     if not wanted:
         raise Conflict(
@@ -334,19 +346,38 @@ def receive_purchase(*, purchase, user, items=None, received_on=None, notes=""):
         received_by=user,
     )
 
-    for item, quantity in wanted:
-        create_stock_movement(
-            user=user,
-            business=purchase.business,
-            product=item.product,
-            movement_type=StockMovement.MovementType.PURCHASE_RECEIPT,
-            quantity=quantity,
-            reference=purchase.purchase_no,
-            notes=f"Purchase from {purchase.supplier.name}",
-        )
+    for item, quantity, damaged in wanted:
+        good = quantity - damaged
+        note = f"Purchase from {purchase.supplier.name}"
+
+        if good > 0:
+            create_stock_movement(
+                user=user,
+                business=purchase.business,
+                product=item.product,
+                movement_type=StockMovement.MovementType.PURCHASE_RECEIPT,
+                quantity=good,
+                reference=purchase.purchase_no,
+                notes=note,
+            )
+
+        if damaged > 0:
+            create_stock_movement(
+                user=user,
+                business=purchase.business,
+                product=item.product,
+                movement_type=StockMovement.MovementType.PURCHASE_RECEIPT,
+                quantity=damaged,
+                stock_condition=StockMovement.StockCondition.DAMAGED,
+                reference=purchase.purchase_no,
+                notes=f"{note} (arrived damaged)",
+            )
 
         PurchaseReceiptItem.objects.create(
-            receipt=receipt, purchase_item=item, quantity=quantity
+            receipt=receipt,
+            purchase_item=item,
+            quantity=quantity,
+            damaged_quantity=damaged,
         )
 
         item.received_quantity += quantity

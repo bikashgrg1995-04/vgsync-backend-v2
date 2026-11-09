@@ -295,6 +295,63 @@ class ReceiveStockTests(PurchaseTestCase):
         self.assertEqual(movement.balance_before, 0)
         self.assertEqual(movement.balance_after, dec("10.500"))
 
+    def test_damaged_goods_go_to_damaged_stock(self):
+        purchase = self.made(items=[self.line(self.oil, "10")])
+        line = purchase["items"][0]["id"]
+
+        response = self.client.post(
+            f"{BASE}{purchase['id']}/receive/",
+            {"items": [{"purchase_item": line, "quantity": "10", "damaged_quantity": "3"}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.json()["status"], "received")
+
+        balance = StockBalance.objects.get(product=self.oil, business=self.ho)
+        self.assertEqual(balance.quantity, dec("7"))
+        self.assertEqual(balance.damaged_quantity, dec("3"))
+
+        conditions = {
+            m.stock_condition: m.quantity
+            for m in StockMovement.objects.filter(stock_balance=balance)
+        }
+        self.assertEqual(conditions, {"good": dec("7"), "damaged": dec("3")})
+
+        item = response.json()["receipts"][0]["items"][0]
+        self.assertEqual(item["quantity"], "10.000")
+        self.assertEqual(item["damaged_quantity"], "3.000")
+
+    def test_everything_arriving_damaged_leaves_good_stock_alone(self):
+        purchase = self.made(items=[self.line(self.oil, "4")])
+        line = purchase["items"][0]["id"]
+
+        response = self.client.post(
+            f"{BASE}{purchase['id']}/receive/",
+            {"items": [{"purchase_item": line, "quantity": "4", "damaged_quantity": "4"}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        balance = StockBalance.objects.get(product=self.oil, business=self.ho)
+        self.assertEqual(balance.quantity, 0)
+        self.assertEqual(balance.damaged_quantity, dec("4"))
+        self.assertEqual(response.json()["status"], "received")
+
+    def test_damaged_cannot_be_more_than_received(self):
+        purchase = self.made(items=[self.line(self.oil, "5")])
+        line = purchase["items"][0]["id"]
+
+        response = self.client.post(
+            f"{BASE}{purchase['id']}/receive/",
+            {"items": [{"purchase_item": line, "quantity": "2", "damaged_quantity": "3"}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(StockMovement.objects.exists())
+        self.assertEqual(Purchase.objects.get().status, "draft")
+
     def test_receiving_twice_never_double_counts(self):
         purchase = self.made()
         self.receive(purchase["id"])

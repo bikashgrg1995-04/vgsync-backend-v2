@@ -405,7 +405,14 @@ class PurchaseReceiptItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PurchaseReceiptItem
-        fields = ("id", "purchase_item", "product", "product_name", "quantity")
+        fields = (
+            "id",
+            "purchase_item",
+            "product",
+            "product_name",
+            "quantity",
+            "damaged_quantity",
+        )
 
 
 class PurchaseReceiptSerializer(serializers.ModelSerializer):
@@ -439,8 +446,22 @@ class PurchaseLineField(serializers.PrimaryKeyRelatedField):
 class ReceiveItemSerializer(serializers.Serializer):
     purchase_item = PurchaseLineField()
     quantity = serializers.DecimalField(
-        max_digits=14, decimal_places=3, min_value=Decimal("0.001")
+        max_digits=14, decimal_places=3, min_value=Decimal("0.001"),
+        help_text="Everything that arrived, good and damaged together.",
     )
+    damaged_quantity = serializers.DecimalField(
+        max_digits=14, decimal_places=3, min_value=Decimal("0"),
+        required=False, default=Decimal("0"),
+        help_text="How many of ``quantity`` arrived damaged (goes to damaged stock).",
+    )
+
+    def validate(self, attrs):
+        if attrs["damaged_quantity"] > attrs["quantity"]:
+            raise serializers.ValidationError({
+                "damaged_quantity": "Damaged cannot be more than the quantity received."
+            })
+
+        return attrs
 
 
 class ReceivePurchaseSerializer(serializers.Serializer):
