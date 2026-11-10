@@ -244,3 +244,29 @@ class PayrollSummaryView(OwnerReport):
             "date_to": date_to,
             **queries.payroll_summary(request.active_business, date_from, date_to),
         })
+
+
+class DashboardView(APIView):
+    """
+    The owner dashboard in one call. Head Office owners also get a branch
+    overview (read-only). Needs ``dashboard.view``.
+    """
+
+    permission_classes = [
+        IsAuthenticated,
+        HasActiveBusinessContext,
+        HasPermission,
+    ]
+    required_permission = "dashboard.view"
+
+    def get(self, request):
+        from . import dashboard
+
+        return Response(
+            dashboard.owner_dashboard(
+                request.active_business,
+                request.user,
+                request.access_mode,
+                timezone.localdate(),
+            )
+        )
