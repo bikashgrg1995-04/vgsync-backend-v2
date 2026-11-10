@@ -24,6 +24,7 @@ from .access import (
     serialize_active_business,
     validate_user_access,
 )
+from . import rbac
 from .models import User
 from .tokens import revoke_all_refresh_tokens
 
@@ -35,6 +36,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     position_name = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
     can_manage_team = serializers.SerializerMethodField()
+    effective_permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -52,6 +54,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "position_name",
             "permissions",
             "can_manage_team",
+            "effective_permissions",
             "must_change_password",
         )
         read_only_fields = fields
@@ -65,36 +68,47 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_position_name(self, obj):
         return obj.position.name if obj.position else None
 
-    def _position_grants(self, obj):
-        position = obj.position
-
-        if obj.role != User.Role.STAFF or not position or not position.is_active:
-            return []
-
-        return list(position.permissions.all())
+    def _codes(self, obj):
+        return rbac.effective_permissions(obj)
 
     def get_permissions(self, obj):
-        """What a staff member's position allows, so screens can hide the rest."""
+        """
+        What a staff member may do per module (Position grants with the
+        person's own overrides applied), so screens can hide the rest.
+        """
+        if obj.role != User.Role.STAFF:
+            return []
+
+        codes = self._codes(obj)
+        modules = sorted({code.split(".", 1)[0] for code in codes})
+
         return [
             {
-                "module": item.module,
-                "can_view": item.can_view,
-                "can_create": item.can_create,
-                "can_update": item.can_update,
-                "can_delete": item.can_delete,
+                "module": module,
+                "can_view": f"{module}.view" in codes,
+                "can_create": f"{module}.create" in codes,
+                "can_update": f"{module}.update" in codes,
+                "can_delete": f"{module}.delete" in codes,
+                "actions": sorted(
+                    code.split(".", 1)[1]
+                    for code in codes
+                    if code.startswith(f"{module}.")
+                    and code.split(".", 1)[1] not in rbac.FLAG_ACTIONS
+                ),
             }
-            for item in self._position_grants(obj)
+            for module in modules
         ]
 
+    def get_effective_permissions(self, obj):
+        """Every ``module.action`` code the person holds right now."""
+        return sorted(self._codes(obj))
+
     def get_can_manage_team(self, obj):
-        """Owner, or staff whose position grants the staff module."""
+        """Owner, or staff who may view the team."""
         if obj.role == User.Role.OWNER:
             return True
 
-        return any(
-            item.module == "staff" and item.can_view
-            for item in self._position_grants(obj)
-        )
+        return "staff.view" in self._codes(obj)
 
 
 class UserProfileUpdateSerializer(serializers.ModelSerializer):

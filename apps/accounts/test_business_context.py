@@ -243,7 +243,7 @@ class BusinessContextSwitchTests(APITestCase):
         )
         self.create_user(
             "other-owner",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
         )
 
@@ -355,7 +355,7 @@ class BusinessContextSwitchTests(APITestCase):
     def test_user_must_change_password_before_switching_business(self):
         self.create_user(
             "newhire",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
             must_change_password=True,
         )

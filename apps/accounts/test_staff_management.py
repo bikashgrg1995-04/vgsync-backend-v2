@@ -185,19 +185,12 @@ class StaffCreateTests(StaffManagementTestCase):
             self.assertEqual(response.status_code, 400, role)
             self.assertIn("role", response.data)
 
-    def test_admin_and_accountant_can_be_created_without_a_position(self):
+    def test_admin_and_accountant_are_positions_not_roles(self):
         for role in ("admin", "accountant"):
-            response = self.create_staff(
-                username=f"u-{role}", role=role, position=None
-            )
+            response = self.create_staff(username=f"u-{role}", role=role)
 
-            self.assertEqual(response.status_code, 201, response.data)
-
-    def test_admin_cannot_be_given_a_position(self):
-        response = self.create_staff(role="admin")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("position", response.data)
+            self.assertEqual(response.status_code, 400, role)
+            self.assertIn("role", response.data)
 
     def test_branch_owner_manages_the_branch_team(self):
         self.make_user("bowner", User.Role.OWNER, business=self.branch)
@@ -243,17 +236,11 @@ class StaffCreateTests(StaffManagementTestCase):
 class StaffAccessTests(StaffManagementTestCase):
 
     def test_only_the_owner_can_manage_the_team(self):
-        for username, role in (
-            ("adm", User.Role.ADMIN),
-            ("acc", User.Role.ACCOUNTANT),
-        ):
-            self.make_user(username, role, company=self.company)
-
         self.make_user(
             "stf", User.Role.STAFF, company=self.company, position=self.position
         )
 
-        for username in ("adm", "acc", "stf"):
+        for username in ("stf",):
             self.authenticate("ACME-HO", username)
 
             self.assertEqual(self.client.get(STAFF_URL).status_code, 403, username)
@@ -385,12 +372,11 @@ class StaffUpdateTests(StaffManagementTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("position", response.data)
 
-    def test_promoting_to_admin_drops_the_position(self):
+    def test_cannot_change_the_role_to_admin(self):
         response = self.client.patch(self.url, {"role": "admin"}, format="json")
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["role"], "admin")
-        self.assertIsNone(response.data["position"])
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("role", response.data)
 
     def test_cannot_promote_to_owner(self):
         response = self.client.patch(self.url, {"role": "owner"}, format="json")

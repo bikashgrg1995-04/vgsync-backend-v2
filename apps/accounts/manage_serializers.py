@@ -11,7 +11,13 @@ from rest_framework import serializers
 
 from apps.businesses.models import Business
 
-from .models import Position, PositionPermission, User
+from . import rbac
+from .models import (
+    Position,
+    PositionPermission,
+    StaffPermissionOverride,
+    User,
+)
 from .scope import MANAGEABLE_ROLES, manageable_position_ids, username_taken
 
 
@@ -125,6 +131,25 @@ class _StaffInputSerializer(serializers.ModelSerializer):
 
         if "position" in attrs:
             position = attrs["position"]
+
+            # Picking a Position while creating someone is part of creating
+            # them; moving an existing person needs ``assign_position``.
+            changing = instance is not None and position != instance.position
+            requester = self.context["request"].user
+
+            # Choosing a Position is its own permission for delegated staff.
+            if (
+                changing
+                and requester.role != User.Role.OWNER
+                and not rbac.has_permission(
+                    requester,
+                    "staff.assign_position",
+                    getattr(self.context["request"], "access_mode", "full"),
+                )
+            ):
+                raise serializers.ValidationError(
+                    {"position": "You may not assign positions."}
+                )
         else:
             position = instance.position if instance else None
 
@@ -147,7 +172,9 @@ class _StaffInputSerializer(serializers.ModelSerializer):
 
 
 class StaffCreateSerializer(_StaffInputSerializer):
-    role = serializers.ChoiceField(choices=ROLE_CHOICES, required=True)
+    role = serializers.ChoiceField(
+        choices=ROLE_CHOICES, required=False, default=User.Role.STAFF
+    )
 
     password = serializers.CharField(
         write_only=True,
@@ -234,7 +261,54 @@ class StaffCreateSerializer(_StaffInputSerializer):
 
 
 class StaffUpdateSerializer(_StaffInputSerializer):
-    """Edit details, change role, or assign a position. Username is fixed."""
+    """Edit details or assign a position. Username is fixed."""
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        old_position_id = instance.position_id
+
+        user = super().update(instance, validated_data)
+
+        # A new Position starts clean: one-person exceptions made for the
+        # old Position are not carried over silently.
+        if user.position_id != old_position_id:
+            user.permission_overrides.all().delete()
+
+        return user
+
+
+class OverrideItemSerializer(serializers.Serializer):
+    permission = serializers.CharField()
+    effect = serializers.ChoiceField(
+        choices=["allow", "deny", "inherit"]
+    )
+
+    def validate_permission(self, value):
+        if not rbac.is_valid_code(value):
+            raise serializers.ValidationError("Unknown permission.")
+
+        if value in rbac.RESERVED:
+            raise serializers.ValidationError(
+                "This permission belongs to the owner only."
+            )
+
+        return value
+
+
+class StaffOverridesSerializer(serializers.Serializer):
+    """``overrides``: [{"permission": "sales.cancel", "effect": "allow"}]."""
+
+    overrides = OverrideItemSerializer(many=True)
+
+    def validate_overrides(self, value):
+        codes = [item["permission"] for item in value]
+
+        if len(codes) != len(set(codes)):
+            raise serializers.ValidationError(
+                "Each permission can appear only once."
+            )
+
+        return value
 
 
 class ResetPasswordSerializer(serializers.Serializer):
@@ -258,6 +332,8 @@ class ResetPasswordSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 
 class PositionPermissionSerializer(serializers.ModelSerializer):
+    """Read shape of one module's grants (flags plus finer actions)."""
+
     class Meta:
         model = PositionPermission
         fields = (
@@ -266,13 +342,19 @@ class PositionPermissionSerializer(serializers.ModelSerializer):
             "can_create",
             "can_update",
             "can_delete",
+            "actions",
         )
 
+    actions = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
+
     def validate(self, attrs):
+        module = attrs["module"]
         wants_write = any(
             attrs.get(flag, False)
             for flag in ("can_create", "can_update", "can_delete")
-        )
+        ) or bool(attrs.get("actions"))
 
         if wants_write and not attrs.get("can_view", False):
             raise serializers.ValidationError(
@@ -280,11 +362,33 @@ class PositionPermissionSerializer(serializers.ModelSerializer):
                 "delete is allowed."
             )
 
+        for action in attrs.get("actions", []):
+            code = f"{module}.{action}"
+
+            if not rbac.is_valid_code(code):
+                raise serializers.ValidationError(f"Unknown permission: {code}.")
+
+            if code in rbac.RESERVED:
+                raise serializers.ValidationError(
+                    f"{code} belongs to the owner only."
+                )
+
         return attrs
 
 
 class PositionSerializer(serializers.ModelSerializer):
     permissions = PositionPermissionSerializer(many=True, required=False)
+    # Write: the full list of ``module.action`` codes this Position grants.
+    codes = serializers.ListField(
+        child=serializers.CharField(), required=False, write_only=True
+    )
+    # Write once, on create: start from a preset's grants.
+    preset = serializers.ChoiceField(
+        choices=[(key, key) for key in rbac.PRESETS],
+        required=False,
+        allow_blank=True,
+    )
+    granted = serializers.SerializerMethodField()
     staff_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -293,8 +397,12 @@ class PositionSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "description",
+            "department",
+            "preset",
             "is_active",
             "permissions",
+            "codes",
+            "granted",
             "staff_count",
             "created_at",
             "updated_at",
@@ -304,6 +412,9 @@ class PositionSerializer(serializers.ModelSerializer):
     @property
     def business(self):
         return self.context["request"].active_business
+
+    def get_granted(self, obj):
+        return sorted(rbac.position_codes(obj))
 
     def get_staff_count(self, obj):
         count = getattr(obj, "staff_count", None)
@@ -331,15 +442,17 @@ class PositionSerializer(serializers.ModelSerializer):
 
         return value
 
-    def validate_permissions(self, value):
-        modules = [item["module"] for item in value]
+    def validate_codes(self, value):
+        for code in value:
+            if not rbac.is_valid_code(code):
+                raise serializers.ValidationError(f"Unknown permission: {code}.")
 
-        if len(modules) != len(set(modules)):
-            raise serializers.ValidationError(
-                "Each module can appear only once."
-            )
+            if code in rbac.RESERVED:
+                raise serializers.ValidationError(
+                    f"{code} belongs to the owner only."
+                )
 
-        return value
+        return sorted(set(value))
 
     def validate(self, attrs):
         if (
@@ -360,8 +473,22 @@ class PositionSerializer(serializers.ModelSerializer):
         return attrs
 
     @staticmethod
+    def _codes(validated_data, instance=None):
+        """Codes to store: explicit ``codes`` win over a preset."""
+        codes = validated_data.pop("codes", None)
+        preset = validated_data.get("preset")
+
+        if codes is None and preset and instance is None:
+            codes = sorted(rbac.preset_codes(preset) - rbac.RESERVED)
+
+        return codes
+
+    @staticmethod
     def _save_permissions(position, permissions):
+        """Per-module flags: listed modules are set exactly, others kept."""
         for item in permissions:
+            actions = sorted(set(item.get("actions", [])))
+
             PositionPermission.objects.update_or_create(
                 position=position,
                 module=item["module"],
@@ -370,17 +497,37 @@ class PositionSerializer(serializers.ModelSerializer):
                     "can_create": item.get("can_create", False),
                     "can_update": item.get("can_update", False),
                     "can_delete": item.get("can_delete", False),
+                    "actions": actions,
                 },
             )
 
+    def validate_permissions(self, value):
+        modules = [item["module"] for item in value]
+
+        if len(modules) != len(set(modules)):
+            raise serializers.ValidationError(
+                "Each module can appear only once."
+            )
+
+        return value
+
     @transaction.atomic
     def create(self, validated_data):
+        codes = self._codes(validated_data)
         permissions = validated_data.pop("permissions", [])
+
+        preset = validated_data.get("preset")
+
+        if preset and not validated_data.get("department"):
+            validated_data["department"] = rbac.PRESETS[preset]["department"]
 
         position = Position.objects.create(
             business=self.business,
             **validated_data,
         )
+
+        if codes:
+            rbac.write_position_codes(position, codes)
 
         self._save_permissions(position, permissions)
 
@@ -388,15 +535,20 @@ class PositionSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        codes = self._codes(validated_data, instance)
         permissions = validated_data.pop("permissions", None)
+        validated_data.pop("preset", None)
 
         for field, value in validated_data.items():
             setattr(instance, field, value)
 
         instance.save()
 
-        # Modules listed in the request are set to exactly what was sent;
-        # modules that are not listed keep their current permissions.
+        # Everyone holding the Position inherits the change at once; their
+        # own overrides stay as they are.
+        if codes is not None:
+            rbac.write_position_codes(instance, codes)
+
         if permissions is not None:
             self._save_permissions(instance, permissions)
 

@@ -26,7 +26,7 @@ class AuthThrottlingTests(APITestCase):
             User.objects.create_user(
                 username=username,
                 password=PASSWORD,
-                role=User.Role.ADMIN,
+                role=User.Role.OWNER,
                 company=self.company,
             )
 

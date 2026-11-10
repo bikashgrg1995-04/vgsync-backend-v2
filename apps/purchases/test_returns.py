@@ -598,6 +598,12 @@ class ReturnAccessTests(ReturnTestCase):
     def staff(self, username, **perms):
         position = self.make_position(self.ho, f"P-{username}", **perms)
 
+        # Sending goods back is its own permission (``purchases.return``).
+        if "create" in perms.get("purchases", ()):
+            position.permissions.filter(module="purchases").update(
+                actions=["return"]
+            )
+
         return self.make_user(
             username, User.Role.STAFF, company=self.company, position=position
         )

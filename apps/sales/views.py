@@ -87,6 +87,8 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
         HasModulePermission,
     ]
     permission_module = "sales"
+    # ``cancel`` needs its own permission; the rest follow the HTTP method.
+    permission_actions = {"cancel": "cancel"}
 
     def handle_exception(self, exc):
         # The inventory services raise Django errors (for example "not

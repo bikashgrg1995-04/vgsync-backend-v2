@@ -198,7 +198,10 @@ class SalesReportExportTests(ReturnTestCase):
         self.assertEqual(response["Content-Type"], "application/json")
 
     def test_only_the_owner_can_download(self):
-        self.make_user("boss", "admin", company=self.company)
+        position = self.make_position(self.ho, "Sales", sales=("view",))
+        self.make_user(
+            "boss", "staff", company=self.company, position=position
+        )
         self.authenticate("ACME-HO", "boss")
 
         self.assertEqual(self.get("/api/v1/reports/profit-loss/", "pdf").status_code, 403)

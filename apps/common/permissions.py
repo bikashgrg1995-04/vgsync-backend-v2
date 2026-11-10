@@ -1,7 +1,8 @@
 
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from apps.accounts.models import PositionPermission, User
+from apps.accounts import rbac
+from apps.accounts.models import User
 
 
 class HasActiveBusinessContext(BasePermission):
@@ -47,27 +48,75 @@ class IsOwner(BasePermission):
         return getattr(request, "access_mode", None) == "full"
 
 
+_METHOD_ACTIONS = {
+    "GET": "view",
+    "HEAD": "view",
+    "POST": "create",
+    "PUT": "update",
+    "PATCH": "update",
+    "DELETE": "delete",
+}
+
+
+def required_action(request, view):
+    """
+    The action a request needs: from the method (GET view, POST create, ...)
+    unless the view maps one of its own actions in ``permission_actions``,
+    for example ``{"cancel": "cancel", "void": "void"}``.
+    """
+    mapped = getattr(view, "permission_actions", {}).get(
+        getattr(view, "action", None)
+    )
+
+    return mapped or _METHOD_ACTIONS.get(request.method)
+
+
+class HasModulePermission(BasePermission):
+    """
+    Module permission check backed by the permission resolver
+    (``apps.accounts.rbac``): owner, else Position grants with the person's
+    own overrides. The answer is read from the database on every request, so
+    a change applies immediately.
+
+    Views using this permission must define ``permission_module`` and may
+    define ``permission_actions`` for non-CRUD actions.
+    """
+
+    message = "You do not have permission to perform this action."
+
+    def has_permission(self, request, view):
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        # OPTIONS is required for API metadata/preflight handling.
+        if request.method == "OPTIONS":
+            return True
+
+        action = required_action(request, view)
+        module = getattr(view, "permission_module", None)
+
+        # Unknown methods and views without a module are denied.
+        if not action or not module:
+            return False
+
+        return rbac.has_permission(
+            user,
+            f"{module}.{action}",
+            getattr(request, "access_mode", "full"),
+        )
+
+
 class CanManageTeam(BasePermission):
     """
-    Who may use the team (staff) API: the owner, and staff whose Position
-    grants the "staff" module (the "Administration" position).
-
-    The owner follows ``IsOwner`` (read-only for a company owner inside a
-    Branch). A position holder needs the matching View/Create/Update/Delete
-    right. Users with the admin or accountant role are not included: team
-    management is delegated through Positions, not roles.
+    Who may use the team (staff) API: the owner, and staff holding the
+    matching ``staff.*`` permission. Owners follow ``IsOwner`` (read-only
+    for a company owner inside a Branch).
     """
 
     message = "You do not have permission to manage the team."
-
-    ACTION_FIELDS = {
-        "GET": "can_view",
-        "HEAD": "can_view",
-        "POST": "can_create",
-        "PUT": "can_update",
-        "PATCH": "can_update",
-        "DELETE": "can_delete",
-    }
 
     def has_permission(self, request, view):
         user = request.user
@@ -82,37 +131,26 @@ class CanManageTeam(BasePermission):
         if user.role == User.Role.OWNER:
             return IsOwner().has_permission(request, view)
 
-        if user.role != User.Role.STAFF:
+        action = required_action(request, view)
+
+        if not action:
             return False
 
-        field = self.ACTION_FIELDS.get(request.method)
-
-        if not field:
-            return False
-
-        return HasModulePermission._has_position_permission(
-            user, "staff", field
+        return rbac.has_permission(
+            user,
+            f"staff.{action}",
+            getattr(request, "access_mode", "full"),
         )
 
 
-class HasModulePermission(BasePermission):
+class HasPermission(BasePermission):
     """
-    Enforces role-based and Position-based module permissions.
-
-    Views using this permission must define:
-        permission_module = "inventory"
+    Needs one explicit code, set on the view as ``required_permission`` (or
+    per action in ``required_permissions``). For endpoints that are not a
+    plain module (reports, approvals).
     """
 
     message = "You do not have permission to perform this action."
-
-    ACTION_FIELDS = {
-        "GET": "can_view",
-        "HEAD": "can_view",
-        "POST": "can_create",
-        "PUT": "can_update",
-        "PATCH": "can_update",
-        "DELETE": "can_delete",
-    }
 
     def has_permission(self, request, view):
         user = request.user
@@ -121,73 +159,17 @@ class HasModulePermission(BasePermission):
         if not user or not user.is_authenticated or business is None:
             return False
 
-        # OPTIONS is required for API metadata/preflight handling.
         if request.method == "OPTIONS":
             return True
 
-        permission_field = self.ACTION_FIELDS.get(request.method)
+        per_action = getattr(view, "required_permissions", {})
+        code = per_action.get(getattr(view, "action", None)) or getattr(
+            view, "required_permission", None
+        )
 
-        # Unknown HTTP methods are denied.
-        if not permission_field:
+        if not code:
             return False
 
-        module = getattr(view, "permission_module", None)
-
-        # Fail closed if the API view has no module configured.
-        if not module:
-            return False
-
-        # Company-level users have full access to Head Office.
-        # Their branch access is read-only.
-        if user.company_id:
-            if user.role == User.Role.STAFF:
-                return self._has_position_permission(
-                    user,
-                    module,
-                    permission_field,
-                )
-
-            if user.role in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-            ]:
-                if getattr(request, "access_mode", None) == "read_only":
-                    return permission_field == "can_view"
-
-                return True
-
-            return False
-
-        # Business-level users can access their assigned business.
-        if user.business_id:
-            if user.role == User.Role.STAFF:
-                return self._has_position_permission(
-                    user,
-                    module,
-                    permission_field,
-                )
-
-            return user.role in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-            ]
-
-        return False
-
-    @staticmethod
-    def _has_position_permission(user, module, permission_field):
-        if not user.position_id:
-            return False
-
-        position = user.position
-
-        if not position.is_active:
-            return False
-
-        return PositionPermission.objects.filter(
-            position=position,
-            module=module,
-            **{permission_field: True},
-        ).exists()
+        return rbac.has_permission(
+            user, code, getattr(request, "access_mode", "full")
+        )

@@ -42,11 +42,11 @@ class TransferAPITests(APITestCase):
             username="ho-owner", password=PASSWORD, role=User.Role.OWNER, company=self.company
         )
         self.branch_admin = User.objects.create_user(
-            username="br-admin", password=PASSWORD, role=User.Role.ADMIN,
+            username="br-admin", password=PASSWORD, role=User.Role.OWNER,
             business=self.branch,
         )
         self.other_admin = User.objects.create_user(
-            username="b2-admin", password=PASSWORD, role=User.Role.ADMIN,
+            username="b2-admin", password=PASSWORD, role=User.Role.OWNER,
             business=self.other_branch,
         )
 

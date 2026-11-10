@@ -22,14 +22,7 @@ class BranchListView(APIView):
         active_business = request.active_business
 
         # Only company-wide roles can switch between company businesses.
-        if (
-            not user.company_id
-            or user.role not in [
-                User.Role.OWNER,
-                User.Role.ADMIN,
-                User.Role.ACCOUNTANT,
-            ]
-        ):
+        if not user.company_id or user.role != User.Role.OWNER:
             return Response(
                 {
                     "detail": (

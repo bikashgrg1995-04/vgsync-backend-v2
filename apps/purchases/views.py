@@ -26,6 +26,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.approvals.models import Kind
+from apps.approvals.services import gate
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 
 from .models import (
@@ -79,6 +81,7 @@ class PurchaseBaseViewSet(viewsets.ModelViewSet):
         HasModulePermission,
     ]
     permission_module = "purchases"
+    permission_actions = {}
 
     def handle_exception(self, exc):
         # The inventory services raise Django errors (for example "product
@@ -286,6 +289,7 @@ class SupplierViewSet(PurchaseBaseViewSet):
 # ---------------------------------------------------------------------------
 
 class PurchaseViewSet(PurchaseBaseViewSet):
+    permission_actions = {"receive": "receive"}
     """
     Purchases of the active business.
 
@@ -391,6 +395,20 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         data = dict(serializer.validated_data)
         data.setdefault("purchase_date", timezone.localdate())
 
+        # High-value purchases wait for approval (owner-set threshold).
+        subtotal = sum(
+            (item["quantity"] * item["unit_price"] for item in data["items"]),
+            Decimal("0"),
+        )
+        after_discount = max(
+            subtotal - data.get("discount_amount", Decimal("0")), Decimal("0")
+        )
+        total = (
+            after_discount * (1 + data.get("vat_rate", Decimal("0")) / 100)
+            + data.get("freight_amount", Decimal("0"))
+        )
+        gate(request, Kind.PURCHASE, total, f"Purchase {data['supplier']}")
+
         purchase = create_purchase(
             business=request.active_business, user=request.user, **data
         )
@@ -456,6 +474,7 @@ class PurchaseViewSet(PurchaseBaseViewSet):
 # ---------------------------------------------------------------------------
 
 class PurchasePaymentViewSet(PurchaseBaseViewSet):
+    permission_actions = {"create": "pay"}
     """
     Payments to suppliers: full or part, also before the goods arrive.
     A payment cannot be edited; void it with a reason. Each payment also
@@ -519,6 +538,7 @@ class PurchasePaymentViewSet(PurchaseBaseViewSet):
 # ---------------------------------------------------------------------------
 
 class PurchaseReturnViewSet(PurchaseBaseViewSet):
+    permission_actions = {"create": "return"}
     """
     Goods sent back to the supplier from a received purchase. A return takes
     the goods out of stock and creates a credit with the supplier (shown

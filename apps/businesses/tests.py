@@ -111,31 +111,24 @@ class BranchListAPITests(APITestCase):
             {self.branch.id, self.second_branch.id},
         )
 
-    def test_company_admin_can_list_own_branches(self):
-        self.create_user(
-            "admin",
-            role=User.Role.ADMIN,
-            company=self.company,
+    def test_company_staff_cannot_list_branches(self):
+        from apps.accounts.models import Position
+
+        position = Position.objects.create(
+            business=self.head_office if hasattr(self, "head_office") else self.ho,
+            name="Clerk",
         )
-        self.login("admin")
+        self.create_user(
+            "clerk",
+            role=User.Role.STAFF,
+            company=self.company,
+            position=position,
+        )
+        self.login("clerk")
 
         response = self.client.get(self.branch_list_url)
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(len(response.data), 2)
-
-    def test_accountant_can_list_own_branches(self):
-        self.create_user(
-            "accountant",
-            role=User.Role.ACCOUNTANT,
-            company=self.company,
-        )
-        self.login("accountant")
-
-        response = self.client.get(self.branch_list_url)
-
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(response.status_code, 403, response.data)
 
     def test_branch_user_can_list_company_branches(self):
         self.create_user(

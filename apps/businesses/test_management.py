@@ -39,7 +39,10 @@ class BusinessReadingTests(TenantTestMixin, APITestCase):
         self.assertEqual(found["count"], 1)
 
     def test_only_the_owner_can_read_businesses(self):
-        self.make_user("boss", User.Role.ADMIN, company=self.company)
+        self.make_user(
+            "boss", User.Role.STAFF, company=self.company,
+            position=self.make_position(self.ho, "Boss", staff=("view",)),
+        )
         self.authenticate("ACME-HO", "boss")
 
         self.assertEqual(self.client.get(BUSINESSES).status_code, 403)
@@ -51,7 +54,10 @@ class BusinessReadingTests(TenantTestMixin, APITestCase):
         self.assertEqual(self.client.get(f"{BUSINESSES}branches/").status_code, 200)
 
     def test_a_switched_off_branch_can_no_longer_be_entered(self):
-        self.make_user("clerk", User.Role.ADMIN, business=self.branch)
+        self.make_user(
+            "clerk", User.Role.STAFF, business=self.branch,
+            position=self.make_position(self.branch, "Clerk", sales=("view",)),
+        )
         self.assertEqual(self.login("ACME-BR", "clerk").status_code, 200)
 
         Business.objects.filter(pk=self.branch.pk).update(is_active=False)
@@ -136,7 +142,10 @@ class CompanyTests(TenantTestMixin, APITestCase):
         self.assertTrue(data["is_active"])
 
     def test_only_the_company_owner_can_use_it(self):
-        self.make_user("boss", User.Role.ADMIN, company=self.company)
+        self.make_user(
+            "boss", User.Role.STAFF, company=self.company,
+            position=self.make_position(self.ho, "Boss", staff=("view",)),
+        )
         self.authenticate("ACME-HO", "boss")
 
         self.assertEqual(self.client.get(COMPANY).status_code, 403)

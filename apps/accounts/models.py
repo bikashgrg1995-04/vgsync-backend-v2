@@ -31,6 +31,10 @@ class Position(models.Model):
     )
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    department = models.CharField(max_length=100, blank=True)
+    # Which preset it started from. Information only: editing a preset never
+    # changes a Position, and a Position can be edited freely afterwards.
+    preset = models.CharField(max_length=40, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -61,6 +65,7 @@ class PositionPermission(models.Model):
         FINANCE = "finance", "Finance"
         DASHBOARD = "dashboard", "Dashboard"
         REMINDERS = "reminders", "Reminders"
+        REPORTS = "reports", "Reports"
 
     position = models.ForeignKey(
         Position,
@@ -75,6 +80,8 @@ class PositionPermission(models.Model):
     can_create = models.BooleanField(default=False)
     can_update = models.BooleanField(default=False)
     can_delete = models.BooleanField(default=False)
+    # Finer actions beyond the four flags, e.g. ["cancel", "approve"].
+    actions = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ["module"]
@@ -89,13 +96,50 @@ class PositionPermission(models.Model):
         return f"{self.position.name} - {self.get_module_display()}"
 
 
+class StaffPermissionOverride(models.Model):
+    """
+    One person's exception to their Position: allow or deny one permission
+    code. No row means "inherited" (use the Position).
+    """
+
+    class Effect(models.TextChoices):
+        ALLOW = "allow", "Allowed"
+        DENY = "deny", "Denied"
+
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="permission_overrides",
+    )
+    permission = models.CharField(max_length=60)
+    effect = models.CharField(max_length=10, choices=Effect.choices)
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["permission"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "permission"],
+                name="unique_override_per_user_permission",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.effect} {self.permission}"
+
+
 class User(AbstractUser):
 
     class Role(models.TextChoices):
         SUPER_ADMIN = "super_admin", "Super Admin"
         OWNER = "owner", "Owner"
-        ADMIN = "admin", "Admin"
-        ACCOUNTANT = "accountant", "Accountant"
         STAFF = "staff", "Staff"
 
     # Username is unique within its tenant, not globally.
@@ -173,13 +217,13 @@ class User(AbstractUser):
                     )
                     |
                     Q(
-                        role__in=["owner", "admin", "accountant", "staff"],
+                        role__in=["owner", "staff"],
                         company__isnull=False,
                         business__isnull=True,
                     )
                     |
                     Q(
-                        role__in=["owner", "admin", "accountant", "staff"],
+                        role__in=["owner", "staff"],
                         company__isnull=True,
                         business__isnull=False,
                     )
@@ -262,12 +306,7 @@ class User(AbstractUser):
                     "business, or position."
                 )
 
-        elif self.role in [
-            self.Role.OWNER,
-            self.Role.ADMIN,
-            self.Role.ACCOUNTANT,
-            self.Role.STAFF,
-        ]:
+        elif self.role in [self.Role.OWNER, self.Role.STAFF]:
 
             has_company = bool(self.company_id)
             has_business = bool(self.business_id)

@@ -70,7 +70,7 @@ class StockTransferReceiptServiceTests(TestCase):
         cls.branch_admin = User.objects.create_user(
             username="receipt-branch-admin",
             password="TestPass123!",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=cls.branch,
         )
 

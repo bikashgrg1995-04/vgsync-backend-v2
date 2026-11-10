@@ -137,7 +137,7 @@ class InventoryModulePermissionTests(TestCase):
     def test_branch_admin_has_full_access_to_own_business(self):
         user = self.make_user(
             "permission-branch-admin",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=self.branch,
         )
 

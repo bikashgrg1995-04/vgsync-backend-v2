@@ -146,7 +146,7 @@ class ValidateUserAccessTests(TestCase):
 
     def test_branch_user_has_full_access_to_their_own_branch(self):
         user = self.make_user(
-            "branch-admin", role=User.Role.ADMIN, business=self.branch
+            "branch-admin", role=User.Role.OWNER, business=self.branch
         )
 
         self.assertEqual(

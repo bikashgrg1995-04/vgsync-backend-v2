@@ -30,14 +30,14 @@ class PasswordResetTests(APITestCase):
             username="alice",
             email="alice@example.com",
             password=PASSWORD,
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
             must_change_password=True,
         )
         self.no_email = User.objects.create_user(
             username="bob",
             password=PASSWORD,
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
         )
 

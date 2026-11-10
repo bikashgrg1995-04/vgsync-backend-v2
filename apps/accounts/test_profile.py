@@ -19,7 +19,7 @@ class OwnProfileTests(APITestCase):
             business_code="ACME-HO",
         )
         self.user = User.objects.create_user(
-            username="sita", password=PASSWORD, role=User.Role.ADMIN, company=company
+            username="sita", password=PASSWORD, role=User.Role.OWNER, company=company
         )
         response = self.client.post(
             "/api/v1/auth/login/",
@@ -45,7 +45,7 @@ class OwnProfileTests(APITestCase):
             self.url, {"role": "owner", "username": "root", "first_name": "S"}, format="json"
         )
         self.user.refresh_from_db()
-        self.assertEqual(self.user.role, User.Role.ADMIN)
+        self.assertEqual(self.user.role, User.Role.OWNER)
         self.assertEqual(self.user.username, "sita")
 
     def test_bad_email_and_phone_are_rejected(self):

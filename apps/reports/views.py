@@ -4,7 +4,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.dates import parse_query_date
-from apps.common.permissions import IsOwner
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated
+
+from apps.accounts import rbac
+from apps.common.permissions import HasActiveBusinessContext, HasPermission
 
 from apps.common import export
 
@@ -67,7 +71,12 @@ class OwnerReport(APIView):
     ``?export=xlsx`` or ``?export=pdf`` to download one as a file.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [
+        IsAuthenticated,
+        HasActiveBusinessContext,
+        HasPermission,
+    ]
+    required_permission = "reports.view"
     builder = None
 
     def output(self, request, data):
@@ -75,6 +84,11 @@ class OwnerReport(APIView):
 
         if kind is None:
             return Response(data)
+
+        if not rbac.has_permission(
+            request.user, "reports.export", request.access_mode
+        ):
+            raise PermissionDenied("You may not export reports.")
 
         document = type(self).builder(data, request.active_business)
 

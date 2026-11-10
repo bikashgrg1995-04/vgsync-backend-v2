@@ -132,7 +132,8 @@ class WhatIsRecordedTests(AuditTestCase):
         response = self.client.post(
             "/api/v1/inventory/stock/movements/",
             {"product_id": self.oil.pk, "movement_type": movement, "quantity": "5",
-             "notes": "Found in the store"},
+             "notes": "Found in the store",
+             "adjustment_action": "increase", "adjustment_reason": "found"},
             format="json",
         )
 
@@ -205,7 +206,7 @@ class ReadingTheLogTests(AuditTestCase):
         creates = self.history(action="create")
         sales = self.history(model="sales.sale")
         mine = self.history(actor=self.owner.pk)
-        self.make_user("quiet", "admin", company=self.company)
+        self.make_user("quiet", User.Role.OWNER, company=self.company)
         nobody = self.history(actor=User.objects.get(username="quiet").pk)
 
         self.assertTrue(all(r["action"] == "create" for r in creates))
@@ -237,7 +238,12 @@ class ReadingTheLogTests(AuditTestCase):
         self.assertEqual(self.client.get(f"{AUDIT}{row.pk}/").status_code, 404)
 
     def test_only_the_owner_can_read_it(self):
-        self.make_user("boss", "admin", company=self.company)
+        position = self.make_position(
+            self.ho, "Administrator", sales=("view",), finance=("view",)
+        )
+        self.make_user(
+            "boss", User.Role.STAFF, company=self.company, position=position
+        )
         self.authenticate("ACME-HO", "boss")
 
         self.assertEqual(self.client.get(AUDIT).status_code, 403)

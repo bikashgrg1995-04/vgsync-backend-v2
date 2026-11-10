@@ -415,7 +415,7 @@ class InventoryAccessValidatorTests(TestCase):
     def test_branch_admin_has_full_inventory_access_to_own_branch(self):
         user = self.make_user(
             "inventory-branch-admin",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=self.branch,
         )
 

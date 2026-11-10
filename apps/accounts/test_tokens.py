@@ -182,7 +182,7 @@ class TokenLifecycleTests(APITestCase):
         other = User.objects.create_user(
             username="other",
             password=PASSWORD,
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
         )
         other_session = self.client.post(

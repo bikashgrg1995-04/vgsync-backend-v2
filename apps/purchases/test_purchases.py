@@ -758,7 +758,7 @@ class AccessTests(PurchaseTestCase):
             self.assertEqual(self.client.get(url).status_code, 403, url)
 
     def test_accountants_and_admins_can_work_with_purchases(self):
-        self.make_user("adm", User.Role.ADMIN, company=self.company)
+        self.make_user("adm", User.Role.OWNER, company=self.company)
 
         self.authenticate("ACME-HO", "adm")
 

@@ -15,11 +15,7 @@ ACCESS_FULL = "full"
 ACCESS_READ_ONLY = "read_only"
 
 # Roles that apply across a company (Head Office full access, branches read-only).
-COMPANY_WIDE_ROLES = (
-    User.Role.OWNER,
-    User.Role.ADMIN,
-    User.Role.ACCOUNTANT,
-)
+COMPANY_WIDE_ROLES = (User.Role.OWNER,)
 
 # Roles that can belong directly to a business.
 BUSINESS_ROLES = COMPANY_WIDE_ROLES + (User.Role.STAFF,)

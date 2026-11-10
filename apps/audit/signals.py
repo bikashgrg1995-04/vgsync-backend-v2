@@ -24,6 +24,8 @@ BUSINESS_PATHS = (
     "sale.business_id",
     "supplier.business_id",
     "stock_balance.business_id",
+    "position.business_id",
+    "user.business_id",
 )
 
 # Models to track. The value says which events to record:
@@ -51,6 +53,10 @@ TRACKED = {
     "accounts.User": True,
     "accounts.Position": True,
     "businesses.Business": True,
+    "accounts.PositionPermission": True,
+    "accounts.StaffPermissionOverride": True,
+    "approvals.ApprovalRule": True,
+    "approvals.ApprovalRequest": True,
 }
 
 

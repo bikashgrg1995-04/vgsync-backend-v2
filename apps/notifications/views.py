@@ -4,6 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.accounts import rbac
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 from apps.sales.models import Followup
 
@@ -18,10 +19,19 @@ class CanViewReminders(HasModulePermission):
     marking one read only changes that person's own view of it.
     """
 
-    ACTION_FIELDS = {
-        method: "can_view"
-        for method in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
-    }
+    def has_permission(self, request, view):
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        if request.method == "OPTIONS":
+            return True
+
+        return rbac.has_permission(
+            user, "reminders.view", getattr(request, "access_mode", "full")
+        )
 
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):

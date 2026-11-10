@@ -178,7 +178,7 @@ class ReadingTests(NotificationTestCase):
         self.assertEqual(self.client.get(f"{NOTES}unread-count/").json(), {"unread": 0})
 
     def test_reading_is_per_person(self):
-        self.make_user("boss", User.Role.ADMIN, company=self.company)
+        self.make_user("boss", User.Role.OWNER, company=self.company)
         note = self.notes()["results"][0]
         self.client.post(f"{NOTES}{note['id']}/read/")
 

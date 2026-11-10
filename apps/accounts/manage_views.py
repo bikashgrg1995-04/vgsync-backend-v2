@@ -15,20 +15,23 @@ from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 
 from apps.common.exceptions import Conflict
 from apps.common.permissions import CanManageTeam, IsOwner
 
+from . import rbac
 from .manage_serializers import (
     PositionSerializer,
     ResetPasswordSerializer,
     StaffCreateSerializer,
+    StaffOverridesSerializer,
     StaffSerializer,
     StaffUpdateSerializer,
     generate_temporary_password,
 )
-from .models import PositionPermission, User
+from .models import PositionPermission, StaffPermissionOverride, User
 from .scope import manageable_position_ids, scoped_positions, scoped_users
 from .tokens import revoke_all_refresh_tokens
 
@@ -43,7 +46,22 @@ class StaffViewSet(viewsets.ModelViewSet):
     """
 
     permission_classes = [CanManageTeam]
-    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    http_method_names = [
+        "get", "post", "put", "patch", "delete", "head", "options",
+    ]
+    # Which ``staff.*`` action each custom endpoint needs.
+    permission_actions = {
+        "reactivate": "update",
+        "reset_password": "update",
+        "access": "view",
+    }
+
+    def get_permissions(self):
+        # Changing someone's permissions is reserved for the owner.
+        if self.action == "access" and self.request.method == "PUT":
+            return [IsOwner()]
+
+        return super().get_permissions()
 
     filterset_fields = ("role", "is_active", "position")
     search_fields = ("username", "first_name", "last_name", "email", "phone")
@@ -95,6 +113,11 @@ class StaffViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
+
+        # PUT is only used by the ``access`` endpoint; editing a person is PATCH.
+        if not partial:
+            raise MethodNotAllowed(request.method)
+
         user = self.get_object()
 
         serializer = self.get_serializer(
@@ -159,6 +182,43 @@ class StaffViewSet(viewsets.ModelViewSet):
                 profile.save(update_fields=["accrued_through"])
 
         return Response(StaffSerializer(user).data)
+
+    @action(detail=True, methods=["get", "put"])
+    def access(self, request, pk=None):
+        """
+        Access & Permissions of one person: what their Position gives,
+        their own overrides and the result. ``PUT`` (owner only) replaces
+        the overrides: ``{"overrides": [{"permission": "sales.cancel",
+        "effect": "allow" | "deny" | "inherit"}]}``.
+        """
+        user = self.get_object()
+
+        if request.method == "PUT":
+            serializer = StaffOverridesSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+
+            with transaction.atomic():
+                for item in serializer.validated_data["overrides"]:
+                    if item["effect"] == "inherit":
+                        user.permission_overrides.filter(
+                            permission=item["permission"]
+                        ).delete()
+                    else:
+                        StaffPermissionOverride.objects.update_or_create(
+                            user=user,
+                            permission=item["permission"],
+                            defaults={
+                                "effect": item["effect"],
+                                "created_by": request.user,
+                            },
+                        )
+
+            user = self.get_object()
+
+        data = rbac.breakdown(user)
+        data["position"] = user.position_id
+
+        return Response(data)
 
     @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
@@ -245,6 +305,16 @@ class PositionViewSet(viewsets.ModelViewSet):
         position.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=["get"])
+    def presets(self, request):
+        """Starting templates for a new Position (never kept in sync)."""
+        return Response(rbac.presets())
+
+    @action(detail=False, methods=["get"])
+    def catalogue(self, request):
+        """Every ``module.action`` permission, grouped by module."""
+        return Response(rbac.catalogue())
 
     @action(detail=False, methods=["get"])
     def modules(self, request):

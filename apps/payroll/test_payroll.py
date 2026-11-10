@@ -639,14 +639,25 @@ class BalanceListTests(PayrollTestCase):
 class PayrollAccessTests(PayrollTestCase):
 
     def test_only_the_owner_can_use_payroll(self):
-        self.make_user("adm", User.Role.ADMIN, company=self.company)
-        self.make_user("acc", User.Role.ACCOUNTANT, company=self.company)
+        from apps.accounts import rbac
+
+        for username, preset in (("adm", "administrator"), ("acc", "accountant")):
+            position = self.make_position(self.ho, preset.title())
+            rbac.write_position_codes(position, rbac.preset_codes(preset))
+            self.make_user(
+                username, "staff", company=self.company, position=position
+            )
 
         for username in ("adm", "acc", "ram"):
             self.authenticate("ACME-HO", username, password=self.password)
 
-            for url in (SALARIES_URL, BALANCES_URL, ENTRIES_URL, PAYMENTS_URL, EXPENSES_URL):
+            # Payroll stays with the owner. (Plain expenses follow the
+            # ``finance`` permission, which these positions hold.)
+            for url in (SALARIES_URL, BALANCES_URL, ENTRIES_URL, PAYMENTS_URL):
                 self.assertEqual(self.client.get(url).status_code, 403, (username, url))
+
+            if username == "ram":
+                self.assertEqual(self.client.get(EXPENSES_URL).status_code, 403)
 
             self.assertEqual(self.client.post(PAYMENTS_URL, {}, format="json").status_code, 403)
 

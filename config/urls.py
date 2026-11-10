@@ -24,6 +24,7 @@ urlpatterns = [
     path("api/v1/purchases/", include("apps.purchases.urls")),
     path("api/v1/sales/", include("apps.sales.urls")),
     path("api/v1/support/", include("apps.support.urls")),
+    path("api/v1/approvals/", include("apps.approvals.urls")),
     # Customers and suppliers: profiles and statements.
     path("api/v1/", include("apps.parties.urls")),
 ]

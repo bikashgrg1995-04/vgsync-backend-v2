@@ -301,7 +301,7 @@ class ProductAPITests(APITestCase):
     def test_branch_admin_cannot_create_central_product(self):
         self.create_user(
             "product-branch-admin",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=self.branch,
         )
         self.login("product-branch-admin", "PRODUCT-BR")
@@ -317,7 +317,7 @@ class ProductAPITests(APITestCase):
     def test_branch_cannot_update_parent_product(self):
         self.create_user(
             "product-branch-update-admin",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=self.branch,
         )
         self.login("product-branch-update-admin", "PRODUCT-BR")

@@ -4,11 +4,18 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+from apps.approvals.models import Kind
+from apps.approvals.services import gate
 
 from apps.common.dates import parse_query_date
 from apps.common.exceptions import Conflict
-from apps.common.permissions import IsOwner
+from apps.common.permissions import (
+    HasActiveBusinessContext,
+    HasModulePermission,
+)
 
 from .models import Expense, Income
 from .serializers import ExpenseSerializer, IncomeSerializer, VoidSerializer
@@ -21,7 +28,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     voided, not deleted.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [
+        IsAuthenticated,
+        HasActiveBusinessContext,
+        HasModulePermission,
+    ]
+    permission_module = "finance"
+    permission_actions = {"void": "void", "summary": "view"}
     serializer_class = ExpenseSerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
 
@@ -38,6 +51,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         return Expense.objects.filter(business=self.request.active_business)
 
     def perform_create(self, serializer):
+        gate(
+            self.request,
+            Kind.EXPENSE,
+            serializer.validated_data["amount"],
+            f"Expense: {serializer.validated_data.get('description', '')}",
+        )
+
         serializer.save(
             business=self.request.active_business,
             created_by=self.request.user,
@@ -147,7 +167,13 @@ class IncomeViewSet(viewsets.ModelViewSet):
     Income is voided, not deleted.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [
+        IsAuthenticated,
+        HasActiveBusinessContext,
+        HasModulePermission,
+    ]
+    permission_module = "finance"
+    permission_actions = {"void": "void", "summary": "view"}
     serializer_class = IncomeSerializer
     # Manual income is entered once and voided if wrong, never edited.
     http_method_names = ["get", "post", "head", "options"]

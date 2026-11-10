@@ -18,11 +18,7 @@ from apps.businesses.models import Business
 from .models import Position, User
 
 # Roles an owner can hand out through the API.
-MANAGEABLE_ROLES = (
-    User.Role.ADMIN,
-    User.Role.ACCOUNTANT,
-    User.Role.STAFF,
-)
+MANAGEABLE_ROLES = (User.Role.STAFF,)
 
 
 def scoped_users(business):
@@ -61,34 +57,21 @@ def username_taken(business, username):
     return users.exists()
 
 
-_FLAGS = ("can_view", "can_create", "can_update", "can_delete")
-
-
-def _grants(position):
-    return {
-        item.module: {flag for flag in _FLAGS if getattr(item, flag)}
-        for item in position.permissions.all()
-    }
-
-
 def manageable_position_ids(actor, business):
     """
     Positions a non-owner may assign (and whose holders they may manage):
-    those that grant nothing the actor's own position does not. This stops a
-    delegated administrator from handing out, or taking over, more access
-    than they have themselves.
+    those that grant nothing the actor does not hold themselves. This stops
+    a delegated administrator from handing out, or taking over, more access
+    than they have.
     """
-    own = {}
+    from . import rbac
 
-    if actor.position_id and actor.position.is_active:
-        own = _grants(actor.position)
+    own = rbac.effective_permissions(actor)
 
-    allowed = []
-
-    for position in scoped_positions(business).prefetch_related("permissions"):
-        wanted = _grants(position)
-
-        if all(flags <= own.get(module, set()) for module, flags in wanted.items()):
-            allowed.append(position.pk)
-
-    return allowed
+    return [
+        position.pk
+        for position in scoped_positions(business).prefetch_related(
+            "permissions"
+        )
+        if rbac.position_codes(position) <= own
+    ]

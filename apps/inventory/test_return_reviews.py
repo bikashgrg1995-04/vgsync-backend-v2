@@ -78,7 +78,7 @@ class StockTransferReturnReviewServiceTests(TestCase):
         cls.branch_admin = User.objects.create_user(
             username="return-review-branch-admin",
             password="TestPass123!",
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             business=cls.branch,
         )
 

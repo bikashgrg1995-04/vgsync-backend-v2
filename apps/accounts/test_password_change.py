@@ -29,7 +29,7 @@ class MustChangePasswordTests(APITestCase):
         self.user = User.objects.create_user(
             username="newhire",
             password=TEMP_PASSWORD,
-            role=User.Role.ADMIN,
+            role=User.Role.OWNER,
             company=self.company,
             must_change_password=True,
         )

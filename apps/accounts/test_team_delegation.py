@@ -49,8 +49,13 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
             "cashier", User.Role.STAFF, company=self.company,
             position=self.sales_pos,
         )
+        # Accounts staff: finance only, and no access to the team API.
+        self.acct_pos = self.make_position(
+            self.ho, "Accounts", finance=("view",)
+        )
         self.accountant = self.make_user(
-            "acct", User.Role.ACCOUNTANT, company=self.company,
+            "acct", User.Role.STAFF, company=self.company,
+            position=self.acct_pos,
         )
 
     def as_user(self, username):
@@ -82,7 +87,9 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
 
         acct = self.authenticate("ACME-HO", "acct")
         self.assertFalse(acct["user"]["can_manage_team"])
-        self.assertEqual(acct["user"]["permissions"], [])
+        self.assertEqual(
+            {p["module"] for p in acct["user"]["permissions"]}, {"finance"}
+        )
 
     # ---- who can use the API at all
 
@@ -91,7 +98,7 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         self.assertEqual(self.client.get(STAFF_URL).status_code, 403)
         self.assertEqual(self.client.get(POSITIONS_URL).status_code, 403)
 
-    def test_admin_and_accountant_roles_are_not_enough(self):
+    def test_a_position_without_the_staff_module_is_not_enough(self):
         self.as_user("acct")
         self.assertEqual(self.client.get(STAFF_URL).status_code, 403)
 
@@ -164,7 +171,7 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         )
         self.assertEqual(promote.status_code, 400)
 
-    def test_admin_cannot_create_or_make_admin_or_accountant_roles(self):
+    def test_admin_and_accountant_are_no_longer_roles(self):
         self.as_user("admin1")
 
         response = self.create(role="accountant", position=None)
@@ -172,7 +179,7 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         self.assertIn("role", response.data)
 
         promote = self.client.patch(
-            f"{STAFF_URL}{self.cashier.pk}/", {"role": "admin", "position": None}, format="json"
+            f"{STAFF_URL}{self.cashier.pk}/", {"role": "admin"}, format="json"
         )
         self.assertEqual(promote.status_code, 400)
 
