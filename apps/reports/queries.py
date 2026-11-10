@@ -646,11 +646,12 @@ def payroll_summary(business, date_from, date_to):
     all_paid = _grouped(payments, "staff")
 
     staff_ids = set(period_earned) | set(period_paid) | set(all_earned) | set(all_paid)
+    # Full name when there is one, otherwise the login name.
     names = {
-        row["pk"]: row["username"]
+        row["pk"]: f'{row["first_name"]} {row["last_name"]}'.strip() or row["username"]
         for row in payments.model._meta.get_field("staff").related_model.objects
         .filter(pk__in=staff_ids)
-        .values("pk", "username")
+        .values("pk", "username", "first_name", "last_name")
     }
 
     people = []

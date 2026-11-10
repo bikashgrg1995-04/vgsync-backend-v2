@@ -285,6 +285,14 @@ class PayrollSummaryTests(PayrollTestCase):
         self.assertEqual(report["earned"], "1300.00")
         self.assertEqual(report["paid"], "800.00")
 
+    def test_a_person_is_listed_by_full_name_when_they_have_one(self):
+        self.daily(self.ram)
+        self.wage(self.ram, "2026-01-01", "1000.00")
+
+        names = [p["name"] for p in self.client.get(PAYROLL).json()["staff"]]
+
+        self.assertEqual(names, ["Ram Thapa"])
+
     def test_by_month(self):
         self.daily(self.sita)
         self.wage(self.sita, "2026-01-01", "1000.00")
