@@ -67,10 +67,32 @@ class GeneratingTests(NotificationTestCase):
 
         self.assertEqual(Notification.objects.get().kind, "followup_due")
 
-    def test_future_followups_make_nothing(self):
+    def test_a_followup_three_days_ahead_is_flagged_as_coming_up(self):
+        self.service(ago=0)  # its 3 day check is due in 3 days
+
+        self.assertEqual(generate_for_business(self.ho), 1)
+        note = Notification.objects.get()
+
+        self.assertEqual(note.kind, "followup_soon")
+        self.assertIn("due in 3 days", note.title)
+
+    def test_further_ahead_makes_nothing_yet(self):
         self.service(ago=0)
 
-        self.assertEqual(generate_for_business(self.ho), 0)
+        # Four days before it is due: nothing yet.
+        self.assertEqual(generate_for_business(self.ho, today=day(-1)), 0)
+
+    def test_the_same_followup_is_flagged_again_on_the_day_and_when_late(self):
+        self.service(ago=0)
+
+        generate_for_business(self.ho, today=day(0))
+        generate_for_business(self.ho, today=day(3))
+        generate_for_business(self.ho, today=day(5))
+
+        self.assertEqual(
+            list(Notification.objects.order_by("id").values_list("kind", flat=True)),
+            ["followup_soon", "followup_due", "followup_overdue"],
+        )
 
     def test_running_again_makes_no_duplicates(self):
         self.service(ago=10)
@@ -225,21 +247,29 @@ class WhoSeesThemTests(NotificationTestCase):
         self.service(ago=10)
         self.fresh()
 
-    def test_staff_need_the_reminders_permission(self):
-        without = self.make_position(self.ho, "Cashier", sales=("view",))
-        with_view = self.make_position(self.ho, "Caller", reminders=("view",))
+    def test_due_alerts_are_for_the_owner_and_sales_or_inventory_managers(self):
+        without = self.make_position(self.ho, "Cashier", sales=("view", "create"), reminders=("view",))
+        sales_mgr = self.make_position(self.ho, "Sales lead", sales=("view", "update"))
+        stock_mgr = self.make_position(self.ho, "Stock lead", inventory=("view", "update"))
         self.make_user("nope", User.Role.STAFF, company=self.company, position=without)
-        self.make_user("caller", User.Role.STAFF, company=self.company, position=with_view)
+        self.make_user("caller", User.Role.STAFF, company=self.company, position=sales_mgr)
+        self.make_user("stock", User.Role.STAFF, company=self.company, position=stock_mgr)
 
-        # Without reminders, follow-up reminders stay hidden (task
-        # notifications are still theirs).
+        # Without sales or inventory management, due alerts stay hidden even
+        # with reminders access (task notifications are still theirs).
         self.authenticate("ACME-HO", "nope")
         self.assertEqual(self.client.get(NOTES).status_code, 200)
         self.assertEqual(self.notes()["results"], [])
 
+        self.authenticate("ACME-HO", "stock")
+        self.assertEqual(len(self.notes()["results"]), 1)
+
+        self.authenticate("ACME-HO", "owner")
+        self.assertEqual(len(self.notes()["results"]), 1)
+
         self.authenticate("ACME-HO", "caller")
         self.assertEqual(self.client.get(NOTES).status_code, 200)
-        # View permission is enough to mark them read.
+        # They can mark them read too.
         note = self.notes()["results"][0]
         self.assertEqual(self.client.post(f"{NOTES}{note['id']}/read/").status_code, 200)
 

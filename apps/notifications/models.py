@@ -11,6 +11,7 @@ class Notification(models.Model):
     """
 
     class Kind(models.TextChoices):
+        FOLLOWUP_SOON = "followup_soon", "Follow-up coming up"
         FOLLOWUP_DUE = "followup_due", "Follow-up due"
         FOLLOWUP_OVERDUE = "followup_overdue", "Follow-up overdue"
         TASK_ASSIGNED = "task_assigned", "Task assigned"

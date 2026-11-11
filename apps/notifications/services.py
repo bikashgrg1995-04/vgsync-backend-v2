@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
@@ -10,12 +12,23 @@ from .models import Notification
 # How long a business is left alone after its notifications were made.
 GENERATE_EVERY = 15 * 60
 
+# How many days ahead a follow-up or credit due date starts to be flagged.
+WARN_DAYS_AHEAD = 3
 
-def _text(followup, overdue):
+
+def _text(followup, today):
     who = followup.customer.name if followup.customer_id else "Walk-in customer"
     label = followup.get_kind_display()
-    when = "overdue since" if overdue else "due"
-    title = f"{label} {when} {followup.due_date:%Y-%m-%d}: {who}"
+    days = (followup.due_date - today).days
+
+    if days > 0:
+        when = f"due in {days} day{'s' if days != 1 else ''} ({followup.due_date:%Y-%m-%d})"
+    elif days == 0:
+        when = f"due today ({followup.due_date:%Y-%m-%d})"
+    else:
+        when = f"overdue since {followup.due_date:%Y-%m-%d}"
+
+    title = f"{label} {when}: {who}"
 
     parts = [f"Sale {followup.sale.sale_no}"]
 
@@ -31,8 +44,9 @@ def _text(followup, overdue):
 @transaction.atomic
 def generate_for_business(business, today=None):
     """
-    Make a notification for every pending follow-up that is due today, and
-    another when it becomes overdue. Safe to run again and again: each one
+    Make a notification for every pending follow-up (a call, an instalment
+    or a credit to collect) three days before it is due, again on the day,
+    and again when it becomes overdue. Safe to run again and again: each one
     is made once. Returns how many were made.
     """
     today = today or timezone.localdate()
@@ -40,26 +54,27 @@ def generate_for_business(business, today=None):
     followups = Followup.objects.filter(
         business=business,
         status=Followup.Status.PENDING,
-        due_date__lte=today,
+        due_date__lte=today + timedelta(days=WARN_DAYS_AHEAD),
     ).select_related("customer", "sale")
 
     made = 0
 
     for followup in followups:
-        overdue = followup.due_date < today
-        state = "overdue" if overdue else "due"
-        title, body = _text(followup, overdue)
+        if followup.due_date > today:
+            state, kind = "soon", Notification.Kind.FOLLOWUP_SOON
+        elif followup.due_date == today:
+            state, kind = "due", Notification.Kind.FOLLOWUP_DUE
+        else:
+            state, kind = "overdue", Notification.Kind.FOLLOWUP_OVERDUE
+
+        title, body = _text(followup, today)
 
         _, created = Notification.objects.get_or_create(
             business=business,
             dedupe_key=f"followup:{followup.pk}:{state}",
             defaults={
                 "followup": followup,
-                "kind": (
-                    Notification.Kind.FOLLOWUP_OVERDUE
-                    if overdue
-                    else Notification.Kind.FOLLOWUP_DUE
-                ),
+                "kind": kind,
                 "title": title,
                 "body": body,
                 "due_date": followup.due_date,

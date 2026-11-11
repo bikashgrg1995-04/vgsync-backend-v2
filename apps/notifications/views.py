@@ -13,11 +13,18 @@ from .serializers import NotificationSerializer
 from .services import refresh
 
 
+def sees_due_alerts(user):
+    """The owner, and staff who manage sales or inventory."""
+    return any(
+        rbac.has_permission(user, code) for code in ("sales.update", "inventory.update")
+    )
+
+
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Your notifications in the active business, newest first: tasks handed to
     you, task updates, and (if you may see reminders) follow-ups that are due
-    today or overdue and still pending. They are made on the fly (at most
+    due soon, today or overdue and still pending. They are made on the fly (at most
     every few minutes) and by the ``generate_notifications`` command.
 
     Filters: ``unread=true`` or ``false`` (for you), ``kind``.
@@ -38,12 +45,10 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         business = self.request.active_business
         scope = Q(recipient=user)
 
-        # Follow-up reminders are for the whole team, but only for people who
-        # may see reminders. Once the money is in or the call is made, a
-        # follow-up is no longer news.
-        if rbac.has_permission(
-            user, "reminders.view", getattr(self.request, "access_mode", "full")
-        ):
+        # Follow-up and credit due dates are for the owner and for those who
+        # manage sales or inventory. Once the money is in or the call is
+        # made, a follow-up is no longer news.
+        if sees_due_alerts(user):
             scope |= Q(recipient__isnull=True, followup__status=Followup.Status.PENDING)
 
         queryset = (
