@@ -91,6 +91,20 @@ class BranchListAPITests(APITestCase):
 
         return response
 
+    def test_branch_owner_sees_only_own_branch_in_businesses(self):
+        self.create_user(
+            "branchowner",
+            role=User.Role.OWNER,
+            business=self.branch,
+        )
+        self.login("branchowner", business_code=self.branch.business_code)
+
+        response = self.client.get("/api/v1/businesses/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = response.data.get("results", response.data)
+        self.assertEqual({r["id"] for r in rows}, {self.branch.id})
+
     def test_company_owner_can_list_own_branches(self):
         self.create_user(
             "owner",

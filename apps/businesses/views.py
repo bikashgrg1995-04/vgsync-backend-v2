@@ -76,7 +76,9 @@ class BusinessViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         business = self.request.active_business
 
-        if business.company_id:
+        # Only the company owner sees the whole company. A branch owner
+        # sees their own branch, not their sibling branches.
+        if business.company_id and self.request.user.company_id:
             return Business.objects.filter(
                 company_id=business.company_id
             ).select_related("parent_business")
