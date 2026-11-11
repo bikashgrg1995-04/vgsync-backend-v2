@@ -183,3 +183,221 @@ def build_backup(user, business):
     }
 
     return data, summary
+
+
+# ---------------------------------------------------------------------------
+# Restore
+# ---------------------------------------------------------------------------
+
+# Never restored: sign-in accounts and permissions (passwords are not in a
+# backup), the change history, approvals, notifications, the businesses
+# themselves and stock transfers between businesses (they involve other
+# businesses' data).
+RESTORE_SKIP_APPS = {"accounts", "audit", "approvals", "notifications", "businesses", "support"}
+RESTORE_SKIP_WORDS = ("transfer",)
+
+
+class RestoreError(Exception):
+    pass
+
+
+def restorable_models():
+    """``(model, lookup)`` pairs a restore replaces, one lookup each."""
+    found = []
+
+    for model, paths in backup_models():
+        if model._meta.app_label in RESTORE_SKIP_APPS:
+            continue
+
+        if any(w in model._meta.model_name for w in RESTORE_SKIP_WORDS):
+            continue
+
+        found.append((model, paths[0]))
+
+    return found
+
+
+def read_backup(data, scope_ids):
+    """Open an uploaded ZIP and check it belongs to this scope."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        manifest = json.loads(archive.read("manifest.json"))
+    except (zipfile.BadZipFile, KeyError, ValueError):
+        raise RestoreError("This is not a VGSync backup file.")
+
+    if manifest.get("format_version") != FORMAT_VERSION:
+        raise RestoreError("This backup was made by a different version and cannot be restored.")
+
+    in_file = sorted(b["id"] for b in manifest.get("businesses", []))
+
+    if in_file != sorted(scope_ids):
+        raise RestoreError(
+            "This backup was taken from a different business. "
+            "Restore it from the business it came from."
+        )
+
+    return archive, manifest
+
+
+def _value(field, raw):
+    if field.get_internal_type() == "JSONField":
+        return json.loads(raw) if raw != "" else None
+
+    if raw == "":
+        if field.null:
+            return None
+
+        if field.get_internal_type() in ("CharField", "TextField", "SlugField", "EmailField"):
+            return ""
+
+        return None
+
+    return field.to_python(raw)
+
+
+def _rows_from_csv(archive, model):
+    name = f"{model._meta.label}.csv"
+
+    if name not in archive.namelist():
+        return []
+
+    text = archive.read(name).decode("utf-8-sig")
+    reader = csv.reader(io.StringIO(text))
+    header = next(reader, [])
+    by_attname = {f.attname: f for f in model._meta.concrete_fields}
+    columns = [by_attname.get(h) for h in header]
+    objects = []
+
+    for line in reader:
+        obj = model()
+
+        for field, raw in zip(columns, line):
+            if field is not None:
+                setattr(obj, field.attname, _value(field, raw))
+
+        objects.append(obj)
+
+    return objects
+
+
+def _restorable_rows(archive, model):
+    """Rows of the backup that belong to the businesses being restored."""
+    rows = _rows_from_csv(archive, model)
+
+    if model._meta.label == "inventory.StockMovement":
+        # The backup also holds transfer movements that sit in another
+        # business's stock; those are not this restore's to replace.
+        from apps.inventory.models import StockBalance
+
+        mine = {b.pk for b in _rows_from_csv(archive, StockBalance)}
+        rows = [r for r in rows if r.stock_balance_id in mine]
+
+    return rows
+
+
+def preview_restore(user, business, data):
+    scope_ids = [b.pk for b in businesses_in_scope(user, business)]
+    archive, manifest = read_backup(data, scope_ids)
+    tables = []
+
+    for model, path in restorable_models():
+        lookup = "pk__in" if path == "pk" else f"{path}__in"
+        current = model._default_manager.filter(**{lookup: scope_ids}).count()
+        in_backup = len(_restorable_rows(archive, model))
+
+        if current or in_backup:
+            tables.append(
+                {"table": model._meta.label, "now": current, "backup": in_backup}
+            )
+
+    return {
+        "created_at": manifest.get("created_at"),
+        "created_by": manifest.get("created_by"),
+        "scope": manifest.get("scope"),
+        "businesses": manifest.get("businesses", []),
+        "tables": tables,
+        "backup_rows": sum(t["backup"] for t in tables),
+        "current_rows": sum(t["now"] for t in tables),
+    }
+
+
+def apply_restore(user, business, data):
+    """
+    Replace the business's data with the backup, all or nothing. Returns the
+    number of records restored.
+    """
+    from django.db import IntegrityError, connection, transaction
+
+    scope_ids = [b.pk for b in businesses_in_scope(user, business)]
+    archive, _ = read_backup(data, scope_ids)
+    plan = [(m, p, _restorable_rows(archive, m)) for m, p in restorable_models()]
+    touched = [f for m, _, _ in plan for f in m._meta.concrete_fields if getattr(f, "auto_now", False) or getattr(f, "auto_now_add", False)]
+    saved = [(f, f.auto_now, f.auto_now_add) for f in touched]
+    restored = 0
+
+    # Keep the stored timestamps instead of stamping "now".
+    for field in touched:
+        field.auto_now = False
+        field.auto_now_add = False
+
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute("SET CONSTRAINTS ALL DEFERRED")
+
+            # Find every row to remove first: deleting a parent table would
+            # otherwise hide its children from the lookups.
+            doomed = []
+
+            for model, path, _ in plan:
+                lookup = "pk__in" if path == "pk" else f"{path}__in"
+                doomed.append(
+                    (
+                        model,
+                        list(
+                            model._base_manager.filter(**{lookup: scope_ids})
+                            .values_list("pk", flat=True)
+                        ),
+                    )
+                )
+
+            for model, pks in doomed:
+                for start in range(0, len(pks), 1000):
+                    query = model._base_manager.filter(pk__in=pks[start:start + 1000])
+                    query._raw_delete(query.db)
+
+            for model, _, objects in plan:
+                if objects:
+                    models.QuerySet(model).bulk_create(objects, batch_size=500)
+                    restored += len(objects)
+
+            # Rows were inserted with their own ids: move the counters on.
+            statements = connection.ops.sequence_reset_sql(
+                _no_style(), [m for m, _, _ in plan]
+            )
+
+            with connection.cursor() as cursor:
+                for sql in statements:
+                    cursor.execute(sql)
+
+            # Surface any broken link now, while the whole restore can still
+            # be undone.
+            with connection.cursor() as cursor:
+                cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+    except IntegrityError:
+        raise RestoreError(
+            "Some records made after this backup depend on newer data, so it "
+            "cannot be restored over them. Nothing was changed."
+        )
+    finally:
+        for field, auto_now, auto_now_add in saved:
+            field.auto_now = auto_now
+            field.auto_now_add = auto_now_add
+
+    return restored
+
+
+def _no_style():
+    from django.core.management.color import no_style
+
+    return no_style()

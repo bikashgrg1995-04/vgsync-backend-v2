@@ -91,6 +91,11 @@ CATALOG = {
         "manage_permissions": "Manage permissions",
     },
     "reminders": {"view": "View reminders"},
+    "backup": {
+        "view": "See backups",
+        "create": "Download backups",
+        "restore": "Restore from a backup",
+    },
 }
 
 # Owner only. A Position or override can never grant these, so an

@@ -20,6 +20,14 @@ class BackupLog(models.Model):
         related_name="+",
     )
     created_by_name = models.CharField(max_length=150, blank=True)
+    class Kind(models.TextChoices):
+        BACKUP = "backup", "Backup"
+        RESTORE = "restore", "Restore"
+        SAFETY = "safety", "Safety copy before a restore"
+
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BACKUP)
+    # Only safety copies keep their file, so a restore can be undone.
+    data = models.BinaryField(null=True, blank=True, editable=False)
     # "business" = this business only; "company" = every branch plus the
     # Head Office.
     scope = models.CharField(max_length=10, default="business")

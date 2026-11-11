@@ -66,6 +66,7 @@ class PositionPermission(models.Model):
         DASHBOARD = "dashboard", "Dashboard"
         REMINDERS = "reminders", "Reminders"
         REPORTS = "reports", "Reports"
+        BACKUP = "backup", "Backup & Restore"
 
     position = models.ForeignKey(
         Position,
