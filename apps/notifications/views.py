@@ -1,11 +1,11 @@
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts import rbac
-from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
+from apps.common.permissions import HasActiveBusinessContext
 from apps.sales.models import Followup
 
 from .models import Notification, NotificationRead
@@ -13,38 +13,17 @@ from .serializers import NotificationSerializer
 from .services import refresh
 
 
-class CanViewReminders(HasModulePermission):
-    """
-    Whoever may view reminders may read and mark notifications, since
-    marking one read only changes that person's own view of it.
-    """
-
-    def has_permission(self, request, view):
-        user = request.user
-        business = getattr(request, "active_business", None)
-
-        if not user or not user.is_authenticated or business is None:
-            return False
-
-        if request.method == "OPTIONS":
-            return True
-
-        return rbac.has_permission(
-            user, "reminders.view", getattr(request, "access_mode", "full")
-        )
-
-
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    Notifications for the active business, newest first: follow-ups that are
-    due today or overdue and still pending. They are made on the fly (at most
+    Your notifications in the active business, newest first: tasks handed to
+    you, task updates, and (if you may see reminders) follow-ups that are due
+    today or overdue and still pending. They are made on the fly (at most
     every few minutes) and by the ``generate_notifications`` command.
 
     Filters: ``unread=true`` or ``false`` (for you), ``kind``.
     """
 
-    permission_classes = [IsAuthenticated, HasActiveBusinessContext, CanViewReminders]
-    permission_module = "reminders"
+    permission_classes = [IsAuthenticated, HasActiveBusinessContext]
     serializer_class = NotificationSerializer
 
     filterset_fields = ("kind",)
@@ -55,13 +34,21 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         refresh(self.request.active_business)
 
+        user = self.request.user
+        business = self.request.active_business
+        scope = Q(recipient=user)
+
+        # Follow-up reminders are for the whole team, but only for people who
+        # may see reminders. Once the money is in or the call is made, a
+        # follow-up is no longer news.
+        if rbac.has_permission(
+            user, "reminders.view", getattr(self.request, "access_mode", "full")
+        ):
+            scope |= Q(recipient__isnull=True, followup__status=Followup.Status.PENDING)
+
         queryset = (
-            Notification.objects.filter(
-                business=self.request.active_business,
-                # Once the money is in or the call is made, it is no longer news.
-                followup__status=Followup.Status.PENDING,
-            )
-            .select_related("followup")
+            Notification.objects.filter(scope, business=business)
+            .select_related("followup", "task")
             .annotate(
                 is_read=Exists(
                     NotificationRead.objects.filter(

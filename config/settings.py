@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     "apps.support.apps.SupportConfig",
     "apps.approvals.apps.ApprovalsConfig",
     "apps.backups.apps.BackupsConfig",
+    "apps.tasks.apps.TasksConfig",
 ]
 
 MIDDLEWARE = [

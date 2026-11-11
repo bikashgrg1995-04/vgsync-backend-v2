@@ -70,6 +70,27 @@ def generate_for_business(business, today=None):
     return made
 
 
+def notify(business, recipient, kind, title, body="", *, task=None, link="", dedupe=None):
+    """Tell one person something. Returns 1 if it was made, 0 if the same
+    notification already exists."""
+    import uuid
+
+    _, created = Notification.objects.get_or_create(
+        business=business,
+        dedupe_key=dedupe or f"n:{uuid.uuid4().hex}",
+        defaults={
+            "recipient": recipient,
+            "kind": kind,
+            "title": title[:200],
+            "body": body[:300],
+            "task": task,
+            "link": link,
+        },
+    )
+
+    return int(created)
+
+
 def refresh(business):
     """
     Make the business's notifications now, but at most once every few
@@ -78,7 +99,10 @@ def refresh(business):
     today = timezone.localdate()
 
     if cache.add(f"notifications:{business.pk}:{today}", 1, GENERATE_EVERY):
+        from apps.tasks.services import generate_overdue
+
         generate_for_business(business, today)
+        generate_overdue(business, today)
 
 
 def generate_everywhere(today=None):
@@ -86,6 +110,9 @@ def generate_everywhere(today=None):
     total = 0
 
     for business in Business.objects.filter(is_active=True):
+        from apps.tasks.services import generate_overdue
+
         total += generate_for_business(business, today)
+        total += generate_overdue(business, today)
 
     return total

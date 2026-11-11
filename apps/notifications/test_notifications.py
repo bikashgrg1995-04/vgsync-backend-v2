@@ -231,8 +231,11 @@ class WhoSeesThemTests(NotificationTestCase):
         self.make_user("nope", User.Role.STAFF, company=self.company, position=without)
         self.make_user("caller", User.Role.STAFF, company=self.company, position=with_view)
 
+        # Without reminders, follow-up reminders stay hidden (task
+        # notifications are still theirs).
         self.authenticate("ACME-HO", "nope")
-        self.assertEqual(self.client.get(NOTES).status_code, 403)
+        self.assertEqual(self.client.get(NOTES).status_code, 200)
+        self.assertEqual(self.notes()["results"], [])
 
         self.authenticate("ACME-HO", "caller")
         self.assertEqual(self.client.get(NOTES).status_code, 200)

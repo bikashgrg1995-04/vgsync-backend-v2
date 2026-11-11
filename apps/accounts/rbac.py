@@ -91,6 +91,12 @@ CATALOG = {
         "manage_permissions": "Manage permissions",
     },
     "reminders": {"view": "View reminders"},
+    "tasks": {
+        "view": "See everyone's tasks",
+        "create": "Assign tasks",
+        "update": "Edit and reassign tasks",
+        "delete": "Cancel tasks",
+    },
     "backup": {
         "view": "See backups",
         "create": "Download backups",
@@ -195,6 +201,7 @@ PRESETS = {
             "reports": ["view", "export"],
             "staff": ["view"],
             "reminders": ["view"],
+            "tasks": _all("tasks"),
         },
     },
     "accountant": {

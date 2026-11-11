@@ -13,6 +13,11 @@ class Notification(models.Model):
     class Kind(models.TextChoices):
         FOLLOWUP_DUE = "followup_due", "Follow-up due"
         FOLLOWUP_OVERDUE = "followup_overdue", "Follow-up overdue"
+        TASK_ASSIGNED = "task_assigned", "Task assigned"
+        TASK_UPDATED = "task_updated", "Task updated"
+        TASK_DONE = "task_done", "Task done"
+        TASK_COMMENT = "task_comment", "Task comment"
+        TASK_OVERDUE = "task_overdue", "Task overdue"
 
     business = models.ForeignKey(
         "businesses.Business",
@@ -23,11 +28,30 @@ class Notification(models.Model):
         "sales.Followup",
         on_delete=models.CASCADE,
         related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    task = models.ForeignKey(
+        "tasks.Task",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    # Empty = for everyone who may see reminders; set = for that person only.
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="+",
+        null=True,
+        blank=True,
     )
     kind = models.CharField(max_length=20, choices=Kind.choices)
     title = models.CharField(max_length=200)
     body = models.CharField(max_length=300, blank=True)
-    due_date = models.DateField()
+    due_date = models.DateField(null=True, blank=True)
+    # Where clicking it should go, for example a task.
+    link = models.CharField(max_length=200, blank=True)
     # Stops the same notification being made twice.
     dedupe_key = models.CharField(max_length=60)
 
