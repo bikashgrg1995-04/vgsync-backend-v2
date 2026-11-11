@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     "apps.finance.apps.FinanceConfig",
     "apps.support.apps.SupportConfig",
     "apps.approvals.apps.ApprovalsConfig",
+    "apps.backups.apps.BackupsConfig",
 ]
 
 MIDDLEWARE = [
