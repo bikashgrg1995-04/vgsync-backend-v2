@@ -122,6 +122,13 @@ def is_valid_code(code):
     return code in all_codes()
 
 
+def code_label(code):
+    """``sales.cancel`` -> ``Cancel sales``; an unknown code comes back as it is."""
+    module, _, action = code.partition(".")
+
+    return CATALOG.get(module, {}).get(action, code)
+
+
 def catalogue():
     """The catalogue as data for the API / UI."""
     return [

@@ -132,7 +132,11 @@ class StaffPermissionOverride(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user_id} {self.effect} {self.permission}"
+        from .rbac import code_label
+
+        who = self.user.get_full_name() or self.user.username
+
+        return f"{who}: {self.get_effect_display()} {code_label(self.permission)}"
 
 
 class User(AbstractUser):

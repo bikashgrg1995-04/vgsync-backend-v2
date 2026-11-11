@@ -197,6 +197,52 @@ class ReadingTheLogTests(AuditTestCase):
         self.assertEqual(rows[1]["action"], "create")
         self.assertEqual(rows[0]["actor_name"], "owner")
 
+    def test_a_list_field_says_what_was_added_and_removed(self):
+        from apps.audit.serializers import AuditLogSerializer
+
+        change = AuditLogSerializer._change
+        self.assertEqual(
+            change("actions", "['view', 'cancel']", "['view', 'approve']"),
+            "actions: added approve and removed cancel",
+        )
+        self.assertEqual(change("is_active", True, False), "is active: yes -> no")
+        self.assertEqual(change("position_id", None, 4), "position: none -> 4")
+        self.assertEqual(change("position_id", 1, 2, lambda n, v: {1: "Clerk", 2: "Manager"}[v]), "position: Clerk -> Manager")
+
+    def test_created_rows_read_as_added(self):
+        rows = self.history(model="finance.expense")
+
+        self.assertTrue(rows[1]["summary"].startswith("Added "))
+
+    def test_access_records_read_in_plain_words(self):
+        from apps.audit.models import AuditLog
+        from apps.audit.serializers import AuditLogSerializer
+
+        def summary(model, action, repr_, changes=None):
+            row = AuditLog(model=model, action=action, object_repr=repr_, changes=changes or {})
+            return AuditLogSerializer(row).data["summary"]
+
+        self.assertEqual(
+            summary("accounts.staffpermissionoverride", "create", "Anita Rai: Denied Cancel sales"),
+            "Override set: Anita Rai: Denied Cancel sales",
+        )
+        self.assertEqual(
+            summary("accounts.positionpermission", "delete", "Clerk - Sales"),
+            "Access removed: Clerk - Sales",
+        )
+        self.assertEqual(
+            summary("accounts.positionpermission", "update", "Clerk - Sales", {"actions": ["[]", "['cancel']"]}),
+            "Clerk - Sales: actions: added cancel",
+        )
+
+    def test_an_override_names_the_person_and_the_action(self):
+        from apps.accounts.models import StaffPermissionOverride
+
+        self.assertEqual(
+            str(StaffPermissionOverride(user=self.owner, permission="sales.cancel", effect="deny")),
+            f"{self.owner.get_full_name() or self.owner.username}: Denied Cancel sales",
+        )
+
     def test_one_records_whole_history(self):
         rows = self.history(model="finance.expense", object_id=self.expense["id"])
 

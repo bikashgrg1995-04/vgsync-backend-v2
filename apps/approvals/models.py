@@ -57,7 +57,7 @@ class ApprovalRule(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.kind} >= {self.threshold}"
+        return f"{self.get_kind_display()}: NPR {self.threshold:,.2f} or more"
 
 
 class ApprovalRequest(models.Model):

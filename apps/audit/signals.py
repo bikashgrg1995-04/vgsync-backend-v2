@@ -115,6 +115,16 @@ def _business_id(instance, state):
     return business.pk if business else None
 
 
+def _actor_name(actor):
+    """Full name when the person has one, otherwise the login name."""
+    if actor is None:
+        return ""
+
+    full = f"{getattr(actor, 'first_name', '')} {getattr(actor, 'last_name', '')}".strip()
+
+    return full or getattr(actor, "username", "") or ""
+
+
 def _write(instance, action, changes):
     state = context.current()
 
@@ -126,7 +136,7 @@ def _write(instance, action, changes):
     AuditLog.objects.create(
         business_id=_business_id(instance, state),
         actor=actor,
-        actor_name=getattr(actor, "username", "") or "",
+        actor_name=_actor_name(actor),
         action=action,
         model=instance._meta.label_lower,
         object_id=str(instance.pk),
