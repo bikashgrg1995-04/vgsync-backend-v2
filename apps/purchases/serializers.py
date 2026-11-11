@@ -247,6 +247,7 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
     returned_quantity = serializers.SerializerMethodField()
     returnable_quantity = serializers.SerializerMethodField()
     remaining_quantity = serializers.SerializerMethodField()
+    damaged_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseItem
@@ -263,7 +264,26 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
             "remaining_quantity",
             "returned_quantity",
             "returnable_quantity",
+            "damaged_quantity",
         )
+
+    def get_damaged_quantity(self, obj):
+        """Units that arrived damaged and have not been sent back yet."""
+        from django.db.models import Sum
+
+        arrived = (
+            obj.receipt_items.aggregate(total=Sum("damaged_quantity"))["total"]
+            or Decimal("0")
+        )
+        sent_back = (
+            obj.return_items.filter(
+                purchase_return__status=PurchaseReturn.Status.ACTIVE,
+                stock_condition="damaged",
+            ).aggregate(total=Sum("quantity"))["total"]
+            or Decimal("0")
+        )
+
+        return f"{max(arrived - sent_back, Decimal('0')):.3f}"
 
     def _returned(self, obj):
         # The view annotates this; fall back to the database otherwise.

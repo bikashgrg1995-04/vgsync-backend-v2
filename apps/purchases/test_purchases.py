@@ -322,6 +322,34 @@ class ReceiveStockTests(PurchaseTestCase):
         self.assertEqual(item["quantity"], "10.000")
         self.assertEqual(item["damaged_quantity"], "3.000")
 
+    def test_line_shows_damaged_units_until_sent_back(self):
+        purchase = self.made(items=[self.line(self.oil, "10")])
+        line = purchase["items"][0]["id"]
+        self.client.post(
+            f"{BASE}{purchase['id']}/receive/",
+            {"items": [{"purchase_item": line, "quantity": "10", "damaged_quantity": "3"}]},
+            format="json",
+        )
+
+        listed = self.client.get(BASE).json()
+        listed = listed.get("results", listed)
+        row = next(p for p in listed if p["id"] == purchase["id"])
+        self.assertEqual(row["items"][0]["damaged_quantity"], "3.000")
+
+        back = self.client.post(
+            "/api/v1/purchases/returns/",
+            {
+                "purchase": purchase["id"],
+                "reason": "Damaged in transit",
+                "items": [{"purchase_item": line, "quantity": "3", "stock_condition": "damaged"}],
+            },
+            format="json",
+        )
+        self.assertEqual(back.status_code, 201, back.content)
+
+        detail = self.client.get(f"{BASE}{purchase['id']}/").json()
+        self.assertEqual(detail["items"][0]["damaged_quantity"], "0.000")
+
     def test_everything_arriving_damaged_leaves_good_stock_alone(self):
         purchase = self.made(items=[self.line(self.oil, "4")])
         line = purchase["items"][0]["id"]
