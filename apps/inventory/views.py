@@ -189,8 +189,8 @@ class StockLookupPermission(HasModulePermission):
     """
 
     LOOKUP_CODES = (
-        "sales.create", "sales.update", "orders.create",
-        "purchases.create", "purchases.update",
+        "sales.view", "sales.create", "sales.update", "orders.create",
+        "purchases.view", "purchases.create", "purchases.update",
     )
 
     def has_permission(self, request, view):
