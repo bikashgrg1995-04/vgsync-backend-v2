@@ -206,6 +206,11 @@ class Sale(models.Model):
     emi_months = models.PositiveSmallIntegerField(null=True, blank=True)
     emi_amount = models.DecimalField(**MONEY, null=True, blank=True)
     first_emi_due = models.DateField(null=True, blank=True)
+    # Yearly flat interest on what is left after the down payment. When it is
+    # set (0 means none) the monthly amount is worked out from it.
+    interest_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
     finance_charge = models.DecimalField(**MONEY, default=ZERO)
 
     # When the customer promised to pay what is left (a credit sale).
@@ -296,6 +301,7 @@ class Sale(models.Model):
                         finance_charge=0,
                         emi_months__isnull=True,
                         emi_amount__isnull=True,
+                        interest_rate__isnull=True,
                         first_emi_due__isnull=True,
                     )
                     | Q(

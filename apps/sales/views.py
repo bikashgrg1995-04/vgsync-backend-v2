@@ -26,6 +26,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.accounts import rbac
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 from apps.inventory.models import LocalProduct
 from apps.purchases.views import MONEY_FIELD, sum_of
@@ -89,6 +90,25 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
     permission_module = "sales"
     # ``cancel`` needs its own permission; the rest follow the HTTP method.
     permission_actions = {"cancel": "cancel"}
+
+    # Bike sales and their instalments belong to the owner and to staff who
+    # were given the ``bike_sales`` permissions; everyone else neither sees
+    # nor changes them.
+    def can_bike(self, action="view"):
+        request = self.request
+
+        return rbac.has_permission(
+            request.user,
+            f"bike_sales.{action}",
+            getattr(request, "access_mode", "full"),
+        )
+
+    def need_bike(self, action):
+        if not self.can_bike(action):
+            raise PermissionDenied(
+                "Bike sales and instalments are for the owner and staff given "
+                "the bike sales permission."
+            )
 
     def handle_exception(self, exc):
         # The inventory services raise Django errors (for example "not
@@ -366,6 +386,9 @@ class SaleViewSet(SalesBaseViewSet):
         elif wanted == "paid":
             queryset = queryset.filter(settled__gte=F("due"))
 
+        if not self.can_bike("view"):
+            queryset = queryset.exclude(sale_type=Sale.SaleType.BIKE)
+
         return queryset
 
     def _respond(self, sale, code=status.HTTP_200_OK):
@@ -382,6 +405,12 @@ class SaleViewSet(SalesBaseViewSet):
         data = dict(serializer.validated_data)
         data.setdefault("sale_date", timezone.localdate())
 
+        if (
+            data.get("sale_type") == Sale.SaleType.BIKE
+            or data.get("payment_mode") == Sale.PaymentMode.EMI
+        ):
+            self.need_bike("create")
+
         sale = create_sale(
             business=request.active_business, user=request.user, **data
         )
@@ -390,6 +419,9 @@ class SaleViewSet(SalesBaseViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         sale = self.get_object()
+
+        if sale.sale_type == Sale.SaleType.BIKE:
+            self.need_bike("update")
 
         serializer = SalePatchSerializer(
             sale,
@@ -406,7 +438,18 @@ class SaleViewSet(SalesBaseViewSet):
     @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
         """Hand over the goods: take every line out of stock and lock the sale."""
-        sale = confirm_sale(sale=self.get_object(), user=request.user)
+        sale = self.get_object()
+
+        if sale.sale_type == Sale.SaleType.BIKE:
+            self.need_bike("update")
+
+        sale = confirm_sale(sale=sale, user=request.user)
+
+        if sale.payment_mode == Sale.PaymentMode.EMI:
+            # An instalment due within days is flagged at once.
+            from apps.notifications.services import generate_for_business
+
+            generate_for_business(request.active_business)
 
         return self._respond(sale)
 
@@ -416,8 +459,13 @@ class SaleViewSet(SalesBaseViewSet):
         serializer = ReasonSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        sale = self.get_object()
+
+        if sale.sale_type == Sale.SaleType.BIKE:
+            self.need_bike("update")
+
         sale = cancel_sale(
-            sale=self.get_object(),
+            sale=sale,
             user=request.user,
             reason=serializer.validated_data["reason"],
         )
@@ -450,14 +498,22 @@ class SalePaymentViewSet(SalesBaseViewSet):
     ordering = ("-paid_on", "-id")
 
     def get_queryset(self):
-        return SalePayment.objects.filter(
+        queryset = SalePayment.objects.filter(
             sale__business=self.request.active_business
         ).select_related("sale", "sale__customer")
+
+        if not self.can_bike("view"):
+            queryset = queryset.exclude(sale__sale_type=Sale.SaleType.BIKE)
+
+        return queryset
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+
+        if data["sale"].sale_type == Sale.SaleType.BIKE:
+            self.need_bike("update")
 
         payment = create_payment(
             sale=data["sale"],
@@ -478,8 +534,13 @@ class SalePaymentViewSet(SalesBaseViewSet):
         serializer = ReasonSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        payment = self.get_object()
+
+        if payment.sale.sale_type == Sale.SaleType.BIKE:
+            self.need_bike("update")
+
         payment = void_payment(
-            payment=self.get_object(),
+            payment=payment,
             user=request.user,
             reason=serializer.validated_data["reason"],
         )
@@ -563,6 +624,9 @@ class FollowupViewSet(SalesBaseViewSet):
             business=self.request.active_business
         ).select_related("sale", "customer", "installment")
 
+        if not self.can_bike("view"):
+            queryset = queryset.exclude(kind=Followup.Kind.EMI_DUE)
+
         if self.request.query_params.get("overdue") in ("true", "1"):
             queryset = queryset.filter(
                 status=Followup.Status.PENDING,
@@ -580,9 +644,13 @@ class FollowupViewSet(SalesBaseViewSet):
         """Mark it done, with a note. Maintenance can record an issue and book the next one."""
         serializer = FollowupDoneSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        target = self.get_object()
+
+        if target.kind == Followup.Kind.EMI_DUE:
+            self.need_bike("update")
 
         followup = complete_followup(
-            followup=self.get_object(),
+            followup=target,
             user=request.user,
             note=serializer.validated_data["note"],
             next_due_date=serializer.validated_data.get("next_due_date"),
@@ -596,9 +664,13 @@ class FollowupViewSet(SalesBaseViewSet):
         """Give up on it, with a note saying why."""
         serializer = FollowupSkipSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        target = self.get_object()
+
+        if target.kind == Followup.Kind.EMI_DUE:
+            self.need_bike("update")
 
         followup = skip_followup(
-            followup=self.get_object(),
+            followup=target,
             user=request.user,
             note=serializer.validated_data["note"],
         )

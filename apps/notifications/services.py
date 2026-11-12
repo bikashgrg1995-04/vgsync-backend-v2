@@ -132,6 +132,12 @@ def generate_for_business(business, today=None):
                 "title": title,
                 "body": body,
                 "due_date": followup.due_date,
+                # An instalment opens its sale, where the schedule is.
+                "link": (
+                    f"/dashboard/sales/detail?id={followup.sale_id}"
+                    if followup.kind == Followup.Kind.EMI_DUE and followup.sale_id
+                    else ""
+                ),
             },
         )
         made += created

@@ -77,8 +77,17 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         # Follow-up and credit due dates are for the owner and for those who
         # manage sales or inventory. Once the money is in or the call is
         # made, a follow-up is no longer news.
+        pending = Q(recipient__isnull=True, followup__status=Followup.Status.PENDING)
+        emi = Q(followup__kind=Followup.Kind.EMI_DUE)
+
+        # Instalment dates go to whoever manages bike sales; the other
+        # follow-ups and the supplier payments to those who manage sales or
+        # stock. The owner is in both.
+        if rbac.has_permission(user, "bike_sales.update"):
+            scope |= pending & emi
+
         if sees_due_alerts(user):
-            scope |= Q(recipient__isnull=True, followup__status=Followup.Status.PENDING)
+            scope |= pending & ~emi
             scope |= Q(
                 recipient__isnull=True,
                 purchase__isnull=False,

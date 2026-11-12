@@ -7,7 +7,7 @@ whenever the lines change; the client never sends a total.
 
 import calendar
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 
 from django.db import transaction
 from django.db.models import Max, Sum
@@ -195,6 +195,17 @@ def _resolve_items(business, sale_type, items):
     return resolved
 
 
+def monthly_instalment(principal, yearly_rate, months):
+    """What to pay each month: the amount left plus yearly flat interest
+    (rate x months / 12), shared over the months, rounded up to the paisa so
+    the instalments never fall short."""
+    principal = Decimal(principal)
+    interest = principal * Decimal(yearly_rate) / 100 * months / 12
+    each = (principal + interest) / months
+
+    return each.quantize(Decimal("0.01"), rounding=ROUND_UP)
+
+
 def _check_terms(sale, net_total):
     """
     Settle the payment terms of the sale (full payment or EMI) against the
@@ -216,6 +227,7 @@ def _check_terms(sale, net_total):
             or sale.emi_months
             or sale.emi_amount
             or sale.first_emi_due
+            or sale.interest_rate is not None
         ):
             raise serializers.ValidationError({
                 "payment_mode": "Down payment and EMI details need payment_mode emi."
@@ -233,18 +245,27 @@ def _check_terms(sale, net_total):
             {"customer": "An EMI sale needs a customer."}
         )
 
-    if not sale.emi_months or not sale.emi_amount:
+    if not sale.emi_months:
         raise serializers.ValidationError({
-            "emi_months": "Give the number of months and the monthly EMI amount."
+            "emi_months": "Give the number of months."
         })
 
     sale.down_payment = money(sale.down_payment or 0)
-    sale.emi_amount = money(sale.emi_amount)
 
     if sale.down_payment > net_total:
         raise serializers.ValidationError(
             {"down_payment": "The down payment cannot be more than the total."}
         )
+
+    if sale.interest_rate is not None or not sale.emi_amount:
+        # Worked out here, so it always matches the total: yearly flat
+        # interest on what is left after the down payment, spread evenly.
+        sale.interest_rate = Decimal(sale.interest_rate or 0)
+        sale.emi_amount = monthly_instalment(
+            net_total - sale.down_payment, sale.interest_rate, sale.emi_months
+        )
+
+    sale.emi_amount = money(sale.emi_amount)
 
     payable = sale.down_payment + sale.emi_amount * sale.emi_months
 

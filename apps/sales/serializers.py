@@ -237,6 +237,14 @@ class SaleWriteSerializer(serializers.Serializer):
         required=False, allow_null=True,
         help_text="Defaults to one month after the sale date.",
     )
+    interest_rate = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("0"),
+        max_value=Decimal("100"), required=False, allow_null=True,
+        help_text=(
+            "Yearly interest on the amount after the down payment. Give it "
+            "(0 for none) and the monthly amount is worked out for you."
+        ),
+    )
     # Credit sales: when the customer promised to pay the rest.
     due_date = serializers.DateField(required=False, allow_null=True)
     # Maintenance: the customer's bike.
@@ -415,6 +423,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "emi_months",
             "emi_amount",
             "first_emi_due",
+            "interest_rate",
             "finance_charge",
             "amount_due",
             "due_date",
