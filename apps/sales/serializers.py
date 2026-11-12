@@ -241,7 +241,7 @@ class SaleWriteSerializer(serializers.Serializer):
         max_digits=5, decimal_places=2, min_value=Decimal("0"),
         max_value=Decimal("100"), required=False, allow_null=True,
         help_text=(
-            "Yearly interest on the amount after the down payment. Give it "
+            "Yearly interest (reducing balance) on the amount after the down payment. Give it "
             "(0 for none) and the monthly amount is worked out for you."
         ),
     )

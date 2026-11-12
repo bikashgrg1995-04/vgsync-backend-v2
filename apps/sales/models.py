@@ -206,8 +206,9 @@ class Sale(models.Model):
     emi_months = models.PositiveSmallIntegerField(null=True, blank=True)
     emi_amount = models.DecimalField(**MONEY, null=True, blank=True)
     first_emi_due = models.DateField(null=True, blank=True)
-    # Yearly flat interest on what is left after the down payment. When it is
-    # set (0 means none) the monthly amount is worked out from it.
+    # Yearly interest on what is left after the down payment, charged on the
+    # reducing balance. When it is set (0 means none) the monthly amount
+    # (EMI) is worked out from it.
     interest_rate = models.DecimalField(
         max_digits=5, decimal_places=2, null=True, blank=True
     )

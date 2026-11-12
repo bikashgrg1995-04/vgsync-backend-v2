@@ -10,7 +10,7 @@ NOTES = "/api/v1/notifications/"
 
 
 class EmiInterestTests(BikeTestCase):
-    """The monthly amount is worked out from an optional yearly interest."""
+    """The monthly amount (reducing-balance EMI) comes from an optional yearly interest."""
 
     def terms(self, **extra):
         return {
@@ -18,13 +18,13 @@ class EmiInterestTests(BikeTestCase):
             "emi_months": 10, "interest_rate": "12", **extra,
         }
 
-    def test_interest_is_added_and_shared_over_the_months(self):
+    def test_interest_follows_the_reducing_balance_emi_formula(self):
         sale = self.made_bike(**self.terms())
 
-        # 80000 left, 12% a year for 10 months = 8000 of interest.
-        self.assertEqual(sale["emi_amount"], "8800.00")
-        self.assertEqual(sale["finance_charge"], "8000.00")
-        self.assertEqual(sale["amount_due"], "108000.00")
+        # 80000 left at 1% a month for 10 months: P r (1+r)^n / ((1+r)^n - 1).
+        self.assertEqual(sale["emi_amount"], "8446.57")
+        self.assertEqual(sale["finance_charge"], "4465.70")
+        self.assertEqual(sale["amount_due"], "104465.70")
         self.assertEqual(sale["interest_rate"], "12.00")
 
     def test_no_interest_just_divides_what_is_left(self):
@@ -54,7 +54,7 @@ class EmiInterestTests(BikeTestCase):
         rows = self.detail(sale["id"])["installments"]
 
         self.assertEqual(len(rows), 10)
-        self.assertEqual({r["amount"] for r in rows}, {"8800.00"})
+        self.assertEqual({r["amount"] for r in rows}, {"8446.57"})
 
     def test_changing_the_bike_price_works_the_amount_out_again(self):
         sale = self.made_bike(**self.terms())
@@ -66,8 +66,8 @@ class EmiInterestTests(BikeTestCase):
         )
 
         self.assertEqual(changed.status_code, 200, changed.data)
-        # 70000 left: 70000 + 7000 interest over 10 months.
-        self.assertEqual(changed.json()["emi_amount"], "7700.00")
+        # 70000 left at 12% a year over 10 months.
+        self.assertEqual(changed.json()["emi_amount"], "7390.75")
 
     def test_an_amount_given_without_a_rate_is_still_accepted(self):
         sale = self.made_bike(**self.emi_terms())

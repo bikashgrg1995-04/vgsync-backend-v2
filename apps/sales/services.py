@@ -196,12 +196,20 @@ def _resolve_items(business, sale_type, items):
 
 
 def monthly_instalment(principal, yearly_rate, months):
-    """What to pay each month: the amount left plus yearly flat interest
-    (rate x months / 12), shared over the months, rounded up to the paisa so
-    the instalments never fall short."""
+    """
+    The EMI on a reducing balance: interest is charged each month on what is
+    still owed, at yearly_rate / 12. With r the monthly rate and n the
+    months, EMI = P x r x (1+r)^n / ((1+r)^n - 1). No interest just divides
+    the amount. Rounded up to the paisa so the instalments never fall short.
+    """
     principal = Decimal(principal)
-    interest = principal * Decimal(yearly_rate) / 100 * months / 12
-    each = (principal + interest) / months
+    rate = Decimal(yearly_rate) / 12 / 100
+
+    if rate == 0:
+        each = principal / months
+    else:
+        growth = (1 + rate) ** months
+        each = principal * rate * growth / (growth - 1)
 
     return each.quantize(Decimal("0.01"), rounding=ROUND_UP)
 
@@ -258,8 +266,8 @@ def _check_terms(sale, net_total):
         )
 
     if sale.interest_rate is not None or not sale.emi_amount:
-        # Worked out here, so it always matches the total: yearly flat
-        # interest on what is left after the down payment, spread evenly.
+        # Worked out here, so it always matches the total: reducing-
+        # balance EMI on what is left after the down payment.
         sale.interest_rate = Decimal(sale.interest_rate or 0)
         sale.emi_amount = monthly_instalment(
             net_total - sale.down_payment, sale.interest_rate, sale.emi_months
