@@ -8,6 +8,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 
 from apps.accounts import rbac
+from apps.accounts.models import User
 from apps.common.permissions import HasActiveBusinessContext, HasPermission
 
 from apps.common import export
@@ -237,6 +238,11 @@ class PayrollSummaryView(OwnerReport):
     builder = staticmethod(exports.payroll_summary)
 
     def get(self, request):
+        # Salaries are the owner's business; a reports.view position must
+        # not be able to read what colleagues earn.
+        if request.user.role != User.Role.OWNER:
+            raise PermissionDenied("Only the owner can see payroll.")
+
         date_from, date_to = _range(request)
 
         return self.output(request, {

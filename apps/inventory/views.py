@@ -182,7 +182,41 @@ class ProductDetailView(InventoryBaseView):
 # STOCK BALANCES
 # ==================================================
 
+class StockLookupPermission(HasModulePermission):
+    """
+    The product list that sale and purchase forms pick from. Someone who may
+    record a sale or a purchase needs it even without ``inventory.view``.
+    """
+
+    LOOKUP_CODES = (
+        "sales.create", "sales.update", "orders.create",
+        "purchases.create", "purchases.update",
+    )
+
+    def has_permission(self, request, view):
+        if super().has_permission(request, view):
+            return True
+
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        if request.method != "GET":
+            return False
+
+        mode = getattr(request, "access_mode", "full")
+
+        return any(rbac.has_permission(user, c, mode) for c in self.LOOKUP_CODES)
+
+
 class StockListView(InventoryBaseView):
+    permission_classes = [
+        IsAuthenticated,
+        HasActiveBusinessContext,
+        StockLookupPermission,
+    ]
 
     def get(self, request):
         business = request.active_business
@@ -209,8 +243,23 @@ class StockListView(InventoryBaseView):
             many=True,
             context={"request": request}
         )
+        data = serializer.data
+        mode = getattr(request, "access_mode", "full")
 
-        return Response(serializer.data)
+        # Sellers see what to sell and for how much, not what it cost,
+        # unless they also buy or manage stock.
+        sees_cost = any(
+            rbac.has_permission(request.user, c, mode)
+            for c in ("inventory.view", "purchases.create", "purchases.update")
+        )
+
+        if not sees_cost:
+            data = [
+                {k: v for k, v in row.items() if k != "purchase_price"}
+                for row in data
+            ]
+
+        return Response(data)
 
 
 class StockDetailView(InventoryBaseView):
