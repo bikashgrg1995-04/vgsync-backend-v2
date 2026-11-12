@@ -133,15 +133,16 @@ class PaySetupTests(PayrollTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("rate", response.data)
 
-    def test_daily_pay_has_no_fixed_rate_or_allowances(self):
-        with_rate = self.set_pay(self.sita, "daily", rate="800.00")
+    def test_daily_pay_may_have_a_usual_rate_but_no_allowances(self):
         with_allowance = self.set_pay(self.sita, "daily", allowances="100.00")
-        ok = self.set_pay(self.sita, "daily")
-
-        self.assertEqual(with_rate.status_code, 400)
+        without_rate = self.set_pay(self.sita, "daily")
         self.assertEqual(with_allowance.status_code, 400)
-        self.assertEqual(ok.status_code, 201, ok.data)
-        self.assertIsNone(ok.data["rate"])
+        self.assertEqual(without_rate.status_code, 201, without_rate.data)
+        self.assertIsNone(without_rate.data["rate"])
+
+        with_rate = self.set_pay(self.sita, "daily", rate="800.00")
+        self.assertEqual(with_rate.status_code, 200, with_rate.data)
+        self.assertEqual(money(with_rate.data["rate"]), money("800"))
 
     def test_hourly_pay_is_not_offered(self):
         self.assertEqual(self.set_pay(self.ram, "hourly", rate="100").status_code, 400)
@@ -580,6 +581,89 @@ class DailyWageTests(PayrollTestCase):
         self.assertEqual(response.status_code, 400)
 
 
+WORKDAYS_URL = "/api/v1/payroll/workdays/"
+
+
+class DailySheetTests(PayrollTestCase):
+    """Marking each day present, half or absent works the wage out."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_pay(self.sita, "daily", rate="800.00")
+        self.today(date(2026, 1, 10))
+
+    def mark(self, status, day="2026-01-10", staff=None, **extra):
+        mark = {"staff": (staff or self.sita).pk, "status": status, **extra}
+
+        return self.client.post(
+            WORKDAYS_URL, {"date": day, "marks": [mark]}, format="json"
+        )
+
+    def test_present_pays_the_full_rate_and_half_pays_half(self):
+        self.assertEqual(self.mark("present").status_code, 200)
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("800"))
+
+        self.mark("half", day="2026-01-09")
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("1200"))
+
+    def test_absent_pays_nothing(self):
+        self.assertEqual(self.mark("absent").status_code, 200)
+
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("0"))
+
+    def test_marking_the_day_again_changes_the_wage_instead_of_adding_one(self):
+        self.mark("present")
+        self.mark("half")
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("400"))
+
+        self.mark("absent")
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("0"))
+
+        self.mark("present", extra="150.00")
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("950"))
+
+    def test_a_day_amount_can_be_typed_when_it_is_not_the_usual_rate(self):
+        self.mark("present", amount="1000.00")
+
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("1000"))
+
+    def test_without_a_rate_each_day_needs_an_amount(self):
+        self.set_pay(self.sita, "daily", rate=None)
+
+        self.assertEqual(self.mark("present").status_code, 400)
+        self.assertEqual(self.mark("present", amount="700.00").status_code, 200)
+
+    def test_future_days_and_monthly_staff_are_refused(self):
+        self.assertEqual(self.mark("present", day="2026-01-11").status_code, 400)
+
+        self.monthly()
+
+        self.assertEqual(self.mark("present", staff=self.ram).status_code, 400)
+
+    def test_the_sheet_lists_daily_staff_with_the_month_so_far(self):
+        self.mark("present", day="2026-01-08")
+        self.mark("half", day="2026-01-09")
+        self.mark("absent")
+        self.monthly()
+
+        sheet = self.client.get(WORKDAYS_URL, {"date": "2026-01-10"}).json()
+
+        self.assertEqual([r["staff"] for r in sheet["staff"]], [self.sita.pk])
+        row = sheet["staff"][0]
+        self.assertEqual(row["status"], "absent")
+        self.assertEqual(
+            (row["month"]["present"], row["month"]["half"], row["month"]["absent"]),
+            (1, 1, 1),
+        )
+        self.assertEqual(money(row["month"]["earned"]), money("1200"))
+
+    def test_only_the_owner_runs_the_sheet(self):
+        self.client.force_authenticate(self.ram)
+
+        self.assertEqual(self.client.get(WORKDAYS_URL).status_code, 403)
+        self.assertEqual(self.mark("present").status_code, 403)
+
+
 class BalanceListTests(PayrollTestCase):
 
     def setUp(self):
@@ -822,13 +906,7 @@ class PayrollModelTests(PayrollTestCase):
                 paid_on=date(2026, 1, 1), method="cash",
             )
 
-    def test_database_keeps_the_rate_in_line_with_the_pay_type(self):
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            SalaryProfile.objects.create(
-                user=self.sita, pay_type="daily", rate=Decimal("100"),
-                start_date=date(2026, 1, 1), accrued_through=date(2025, 12, 31),
-            )
-
+    def test_database_needs_a_rate_for_monthly_pay(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
             SalaryProfile.objects.create(
                 user=self.sita, pay_type="monthly", rate=None,

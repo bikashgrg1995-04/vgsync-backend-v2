@@ -23,7 +23,10 @@ from django.utils import timezone
 from apps.businesses.models import Business
 from apps.common.exceptions import Conflict
 
+from rest_framework import serializers as drf
+
 from .models import (
+    WorkDay,
     PayrollEntry,
     PayrollPayment,
     PayType,
@@ -364,3 +367,115 @@ def void_entry(*, entry, actor, reason):
     entry.save(update_fields=["status", "voided_by", "voided_at", "void_reason"])
 
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Daily attendance
+# ---------------------------------------------------------------------------
+
+WORK_FACTOR = {
+    WorkDay.Status.PRESENT: Decimal("1"),
+    WorkDay.Status.HALF: Decimal("0.5"),
+    WorkDay.Status.ABSENT: Decimal("0"),
+}
+
+
+@transaction.atomic
+def mark_work_day(*, business, actor, staff, day, status, extra=Decimal("0"),
+                  amount=None, note=""):
+    """
+    Record a day for someone on daily pay and keep their wage in step.
+
+    Present or half credits the day's wage (the daily rate x 1 or 0.5, or
+    ``amount`` when given, plus ``extra``); absent credits nothing. Marking
+    the same day again changes the wage already credited.
+    """
+    profile = getattr(staff, "salary_profile", None)
+
+    if profile is None or profile.pay_type != PayType.DAILY:
+        raise drf.ValidationError({"staff": "This person is not on daily pay."})
+
+    if not staff.is_active:
+        raise drf.ValidationError({"staff": "This team member is inactive."})
+
+    if day > timezone.localdate():
+        raise drf.ValidationError({"date": "The date cannot be in the future."})
+
+    extra = Decimal(extra or 0)
+
+    work = (
+        WorkDay.objects.select_for_update().filter(staff=staff, work_date=day).first()
+    )
+    entry = work.entry if work and work.entry else None
+
+    if entry is not None and entry.status != PayrollEntry.Status.ACTIVE:
+        entry = None
+
+    if entry is None:
+        # A wage typed in by hand for the day is taken over, not doubled.
+        entry = PayrollEntry.objects.filter(
+            staff=staff,
+            kind=PayrollEntry.Kind.WAGE,
+            entry_date=day,
+            status=PayrollEntry.Status.ACTIVE,
+        ).first()
+
+    label = WorkDay.Status(status).label
+
+    if status == WorkDay.Status.ABSENT:
+        extra = Decimal("0")
+
+        if entry is not None:
+            void_entry(entry=entry, actor=actor, reason="Marked absent")
+            entry = None
+    else:
+        if amount is None:
+            if profile.rate is None:
+                raise drf.ValidationError({
+                    "amount": "Set a daily rate for this person, or enter the amount for the day."
+                })
+
+            wage = (profile.rate * WORK_FACTOR[status]).quantize(Decimal("0.01"))
+        else:
+            wage = Decimal(amount)
+
+        total = wage + extra
+
+        if total <= 0:
+            raise drf.ValidationError({"amount": "The day's pay must be more than zero."})
+
+        description = f"{label} {day:%d %b}" + (f" – {note}" if note else "")
+
+        if entry is None:
+            entry = PayrollEntry.objects.create(
+                business=business,
+                staff=staff,
+                kind=PayrollEntry.Kind.WAGE,
+                entry_date=day,
+                amount=total,
+                description=description[:200],
+                created_by=actor,
+            )
+        else:
+            entry.amount = total
+            entry.description = description[:200]
+            entry.save(update_fields=["amount", "description", "updated_at"])
+
+    values = {
+        "business": business,
+        "status": status,
+        "extra_amount": extra,
+        "note": note,
+        "entry": entry,
+        "marked_by": actor,
+    }
+
+    if work is None:
+        work = WorkDay.objects.create(staff=staff, work_date=day, **values)
+    else:
+        for field, value in values.items():
+            setattr(work, field, value)
+
+        work.save()
+
+    return work

@@ -15,7 +15,7 @@ from apps.accounts.scope import scoped_users
 from apps.common.pagination import StandardPagination
 from apps.common.permissions import IsOwner
 
-from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile
+from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile, WorkDay
 from .serializers import (
     BalanceDetailSerializer,
     BalanceSerializer,
@@ -24,12 +24,14 @@ from .serializers import (
     SalaryProfileSerializer,
     StatementRowSerializer,
     VoidSerializer,
+    WorkSheetSerializer,
     staff_name,
 )
 from .services import (
     balance,
     create_payment,
     ensure_accruals,
+    mark_work_day,
     statement,
     void_entry,
     void_payment,
@@ -474,3 +476,113 @@ class PayrollPaymentViewSet(viewsets.ModelViewSet):
         )
 
         return Response(self.get_serializer(payment).data)
+
+
+# ---------------------------------------------------------------------------
+# Daily attendance
+# ---------------------------------------------------------------------------
+
+def _sheet(business, day):
+    """Everyone on daily pay with their mark for ``day`` and the month so far."""
+    from datetime import date as _date
+    from django.db.models import Count, Q, Sum
+
+    month_start = _date(day.year, day.month, 1)
+    staff = (
+        scoped_users(business)
+        .filter(is_active=True, salary_profile__pay_type=PayType.DAILY)
+        .select_related("salary_profile")
+        .order_by("first_name", "username")
+    )
+    marks = {w.staff_id: w for w in WorkDay.objects.filter(staff__in=staff, work_date=day)
+             .select_related("entry")}
+    month = {
+        row["staff"]: row
+        for row in WorkDay.objects.filter(
+            staff__in=staff, work_date__gte=month_start, work_date__lte=day
+        )
+        .values("staff")
+        .annotate(
+            present=Count("id", filter=Q(status="present")),
+            half=Count("id", filter=Q(status="half")),
+            absent=Count("id", filter=Q(status="absent")),
+            earned=Sum("entry__amount", filter=Q(entry__status="active")),
+        )
+    }
+
+    rows = []
+
+    for person in staff:
+        mark = marks.get(person.pk)
+        stats = month.get(person.pk, {})
+        rows.append({
+            "staff": person.pk,
+            "staff_name": staff_name(person),
+            "rate": person.salary_profile.rate,
+            "status": mark.status if mark else None,
+            "extra": mark.extra_amount if mark else 0,
+            "note": mark.note if mark else "",
+            "amount": mark.entry.amount if mark and mark.entry else 0,
+            "month": {
+                "present": stats.get("present", 0),
+                "half": stats.get("half", 0),
+                "absent": stats.get("absent", 0),
+                "earned": stats.get("earned") or 0,
+            },
+        })
+
+    return {"date": day, "month_start": month_start, "staff": rows}
+
+
+class WorkSheetView(APIView):
+    """
+    The daily sheet: ``GET ?date=`` lists everyone on daily pay with their
+    mark for the day, and ``POST`` saves marks for several people at once.
+    """
+
+    permission_classes = [IsOwner]
+
+    def _day(self, request):
+        from datetime import date as _date
+
+        raw = request.query_params.get("date")
+
+        try:
+            return _date.fromisoformat(raw) if raw else timezone.localdate()
+        except ValueError:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError({"date": "Use the form YYYY-MM-DD."})
+
+    def get(self, request):
+        return Response(_sheet(request.active_business, self._day(request)))
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = WorkSheetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        day = serializer.validated_data["date"]
+        people = scoped_users(request.active_business).in_bulk(
+            [m["staff"] for m in serializer.validated_data["marks"]]
+        )
+
+        for mark in serializer.validated_data["marks"]:
+            staff = people.get(mark["staff"])
+
+            if staff is None:
+                from rest_framework.exceptions import ValidationError
+
+                raise ValidationError({"staff": "Choose a team member of this business."})
+
+            mark_work_day(
+                business=request.active_business,
+                actor=request.user,
+                staff=staff,
+                day=day,
+                status=mark["status"],
+                extra=mark["extra"],
+                amount=mark.get("amount"),
+                note=mark["note"],
+            )
+
+        return Response(_sheet(request.active_business, day))

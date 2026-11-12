@@ -29,8 +29,9 @@ class SalaryProfile(models.Model):
 
     * **Monthly**: a fixed ``rate`` (plus ``allowances``) falls due on
       ``salary_day`` of every month, starting from ``start_date``.
-    * **Daily**: nothing is fixed. The owner enters the amount earned for
-      each day as it happens.
+    * **Daily**: paid for the days worked. ``rate`` is the usual wage for a
+      full day (optional); the owner marks each day present, half or absent
+      and the wage is worked out, or enters the amount for a day by hand.
 
     Changing the rate never alters salary that has already fallen due,
     because each month's entry keeps its own amount.
@@ -46,7 +47,7 @@ class SalaryProfile(models.Model):
         choices=PayType.choices,
         default=PayType.MONTHLY,
     )
-    # Monthly only; empty for daily pay.
+    # Monthly salary, or a daily wage's usual rate (optional for daily pay).
     rate = models.DecimalField(**MONEY, null=True, blank=True)
     allowances = models.DecimalField(**MONEY, default=ZERO)
     # Day of the month salary falls due. Short months use their last day.
@@ -81,7 +82,7 @@ class SalaryProfile(models.Model):
             models.CheckConstraint(
                 condition=(
                     Q(pay_type="monthly", rate__isnull=False)
-                    | Q(pay_type="daily", rate__isnull=True)
+                    | Q(pay_type="daily")
                 ),
                 name="salary_profile_rate_matches_pay_type",
             ),
@@ -245,3 +246,63 @@ class PayrollPayment(models.Model):
 
     def __str__(self):
         return f"{self.staff} paid {self.amount} on {self.paid_on}"
+
+
+class WorkDay(models.Model):
+    """
+    One day's attendance for a person on daily pay. Marking a day present or
+    half credits the wage as a ``PayrollEntry`` (kept in ``entry``); marking
+    it absent credits nothing. Changing the mark updates that entry.
+    """
+
+    class Status(models.TextChoices):
+        PRESENT = "present", "Present"
+        HALF = "half", "Half day"
+        ABSENT = "absent", "Absent"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="work_days",
+    )
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="work_days",
+    )
+    work_date = models.DateField()
+    status = models.CharField(max_length=10, choices=Status.choices)
+    # Extra on top of the day's wage (overtime, a bonus for the day).
+    extra_amount = models.DecimalField(**MONEY, default=ZERO)
+    note = models.CharField(max_length=200, blank=True)
+    entry = models.ForeignKey(
+        PayrollEntry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-work_date", "staff_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["staff", "work_date"], name="one_work_mark_per_day"
+            ),
+            models.CheckConstraint(
+                condition=Q(extra_amount__gte=0),
+                name="work_day_extra_not_negative",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.staff} {self.work_date} {self.status}"

@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from apps.accounts.scope import scoped_users
 
-from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile
+from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile, WorkDay
 from .services import first_accrued_through
 
 AMOUNT = {"max_digits": 12, "decimal_places": 2, "min_value": 0}
@@ -36,7 +36,7 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
         **AMOUNT,
         required=False,
         allow_null=True,
-        help_text="Monthly salary. Leave out for daily pay.",
+        help_text="Monthly salary, or the usual wage for a day on daily pay (optional).",
     )
     allowances = serializers.DecimalField(**AMOUNT, required=False)
     salary_day = serializers.IntegerField(
@@ -82,20 +82,14 @@ class SalaryProfileSerializer(serializers.ModelSerializer):
             attrs["rate"] = rate
 
         else:
-            if attrs.get("rate") is not None:
-                raise serializers.ValidationError({
-                    "rate": (
-                        "Daily pay has no fixed rate. Enter the amount for "
-                        "each day instead."
-                    )
-                })
-
+            # A daily rate is the usual wage for a full day. It is optional:
+            # without it each day's amount is entered by hand.
             if attrs.get("allowances"):
                 raise serializers.ValidationError(
                     {"allowances": "Allowances apply to monthly pay only."}
                 )
 
-            attrs["rate"] = None
+            attrs["rate"] = attrs.get("rate")
             attrs["allowances"] = 0
 
         if instance is not None:
@@ -338,3 +332,23 @@ class StatementRowSerializer(serializers.Serializer):
     advance_part = MoneyField()
     owed_after = MoneyField()
     advance_after = MoneyField()
+
+
+class WorkMarkSerializer(serializers.Serializer):
+    """One person's mark for the day."""
+
+    staff = serializers.IntegerField()
+    status = serializers.ChoiceField(choices=WorkDay.Status.choices)
+    extra = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, default=0
+    )
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True,
+        help_text="The day's wage when it is not the usual rate.",
+    )
+    note = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+
+
+class WorkSheetSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    marks = WorkMarkSerializer(many=True, allow_empty=False, max_length=300)
