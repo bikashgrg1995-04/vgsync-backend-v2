@@ -14,6 +14,9 @@ class Notification(models.Model):
         FOLLOWUP_SOON = "followup_soon", "Follow-up coming up"
         FOLLOWUP_DUE = "followup_due", "Follow-up due"
         FOLLOWUP_OVERDUE = "followup_overdue", "Follow-up overdue"
+        PAYABLE_SOON = "payable_soon", "Supplier payment coming up"
+        PAYABLE_DUE = "payable_due", "Supplier payment due"
+        PAYABLE_OVERDUE = "payable_overdue", "Supplier payment overdue"
         TASK_ASSIGNED = "task_assigned", "Task assigned"
         TASK_UPDATED = "task_updated", "Task updated"
         TASK_DONE = "task_done", "Task done"
@@ -27,6 +30,13 @@ class Notification(models.Model):
     )
     followup = models.ForeignKey(
         "sales.Followup",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+    )
+    purchase = models.ForeignKey(
+        "purchases.Purchase",
         on_delete=models.CASCADE,
         related_name="notifications",
         null=True,

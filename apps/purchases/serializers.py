@@ -143,6 +143,11 @@ class PurchaseWriteSerializer(serializers.Serializer):
     supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.objects.none())
     bill_no = serializers.CharField(max_length=60, required=False, allow_blank=True)
     purchase_date = serializers.DateField(required=False)
+    due_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text="When the supplier expects to be paid.",
+    )
     discount_amount = serializers.DecimalField(
         **MONEY, min_value=Decimal("0"), required=False
     )
@@ -219,6 +224,17 @@ class PurchaseWriteSerializer(serializers.Serializer):
                 raise serializers.ValidationError({
                     "bill_no": "This supplier bill is already entered."
                 })
+
+        due = attrs.get("due_date", instance.due_date if instance else None)
+        bought = attrs.get(
+            "purchase_date",
+            instance.purchase_date if instance else timezone.localdate(),
+        )
+
+        if due and due < bought:
+            raise serializers.ValidationError({
+                "due_date": "The payment cannot be due before the purchase date."
+            })
 
         if instance is None and "items" not in attrs:
             raise serializers.ValidationError({"items": "Add at least one item."})
@@ -373,6 +389,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "supplier_name",
             "bill_no",
             "purchase_date",
+            "due_date",
             "status",
             "items",
             "subtotal",
@@ -738,3 +755,9 @@ class CreditSettlementSerializer(serializers.ModelSerializer):
                 )
 
         return attrs
+
+
+class DueDateSerializer(serializers.Serializer):
+    """Set or clear when the supplier expects to be paid."""
+
+    due_date = serializers.DateField(allow_null=True)

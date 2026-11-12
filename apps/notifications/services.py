@@ -41,6 +41,60 @@ def _text(followup, today):
     return title[:200], ", ".join(parts)[:300]
 
 
+def generate_payables(business, today=None):
+    """
+    The same three heads-ups for money owed to a supplier: three days before
+    the payment is due, on the day, and when it is late. Only purchases that
+    arrived and are not yet paid up.
+    """
+    from apps.purchases.models import Purchase
+    from apps.purchases.services import credit_applied_total, paid_total
+
+    today = today or timezone.localdate()
+    made = 0
+
+    purchases = Purchase.objects.filter(
+        business=business,
+        status__in=[Purchase.Status.PARTIAL, Purchase.Status.RECEIVED],
+        due_date__isnull=False,
+        due_date__lte=today + timedelta(days=WARN_DAYS_AHEAD),
+    ).select_related("supplier")
+
+    for purchase in purchases:
+        owed = purchase.net_total - paid_total(purchase) - credit_applied_total(purchase)
+
+        if owed <= 0:
+            continue
+
+        days = (purchase.due_date - today).days
+
+        if days > 0:
+            state, kind = "soon", Notification.Kind.PAYABLE_SOON
+            when = f"due in {days} day{'s' if days != 1 else ''} ({purchase.due_date:%Y-%m-%d})"
+        elif days == 0:
+            state, kind = "due", Notification.Kind.PAYABLE_DUE
+            when = f"due today ({purchase.due_date:%Y-%m-%d})"
+        else:
+            state, kind = "overdue", Notification.Kind.PAYABLE_OVERDUE
+            when = f"overdue since {purchase.due_date:%Y-%m-%d}"
+
+        _, created = Notification.objects.get_or_create(
+            business=business,
+            dedupe_key=f"purchase:{purchase.pk}:{state}",
+            defaults={
+                "purchase": purchase,
+                "kind": kind,
+                "title": f"Supplier payment {when}: {purchase.supplier.name}"[:200],
+                "body": f"{purchase.purchase_no}, {owed:.2f} left to pay"[:300],
+                "due_date": purchase.due_date,
+                "link": f"/dashboard/purchase/detail?id={purchase.pk}",
+            },
+        )
+        made += created
+
+    return made
+
+
 @transaction.atomic
 def generate_for_business(business, today=None):
     """
@@ -117,6 +171,7 @@ def refresh(business):
         from apps.tasks.services import generate_overdue
 
         generate_for_business(business, today)
+        generate_payables(business, today)
         generate_overdue(business, today)
 
 
@@ -128,6 +183,7 @@ def generate_everywhere(today=None):
         from apps.tasks.services import generate_overdue
 
         total += generate_for_business(business, today)
+        total += generate_payables(business, today)
         total += generate_overdue(business, today)
 
     return total

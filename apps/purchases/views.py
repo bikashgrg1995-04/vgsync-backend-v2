@@ -56,6 +56,7 @@ from .serializers import (
     PurchaseReturnWriteSerializer,
     PurchaseSerializer,
     PurchaseWriteSerializer,
+    DueDateSerializer,
     ReasonSerializer,
     ReceivePurchaseSerializer,
     ReceiveReplacementSerializer,
@@ -289,7 +290,7 @@ class SupplierViewSet(PurchaseBaseViewSet):
 # ---------------------------------------------------------------------------
 
 class PurchaseViewSet(PurchaseBaseViewSet):
-    permission_actions = {"receive": "receive"}
+    permission_actions = {"receive": "receive", "due_date": "update"}
     """
     Purchases of the active business.
 
@@ -451,6 +452,35 @@ class PurchaseViewSet(PurchaseBaseViewSet):
             received_on=serializer.validated_data.get("received_on"),
             notes=serializer.validated_data.get("notes", ""),
         )
+        self._flag_payment_due()
+
+        return self._respond(purchase)
+
+    def _flag_payment_due(self):
+        """Raise the heads-up now if the payment is already within 3 days."""
+        from apps.notifications.services import generate_payables
+
+        generate_payables(self.request.active_business)
+
+    @action(detail=True, methods=["post"], url_path="due-date")
+    def due_date(self, request, pk=None):
+        """Set or clear the payment due date, also after the goods arrived."""
+        purchase = self.get_object()
+        serializer = DueDateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        due = serializer.validated_data["due_date"]
+
+        if purchase.status == Purchase.Status.CANCELLED:
+            raise ValidationError({"detail": "A cancelled purchase has nothing to pay."})
+
+        if due and due < purchase.purchase_date:
+            raise ValidationError(
+                {"due_date": "The payment cannot be due before the purchase date."}
+            )
+
+        purchase.due_date = due
+        purchase.save(update_fields=["due_date", "updated_at"])
+        self._flag_payment_due()
 
         return self._respond(purchase)
 

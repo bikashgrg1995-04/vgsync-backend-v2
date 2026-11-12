@@ -306,3 +306,82 @@ class WhoSeesThemTests(NotificationTestCase):
         self.assertIn("Branch Buyer", listed["results"][0]["title"])
         note = listed["results"][0]
         self.assertEqual(self.client.post(f"{NOTES}{note['id']}/read/").status_code, 200)
+
+
+class SupplierPaymentAlertTests(NotificationTestCase):
+    def purchase(self, due_in, receive=True):
+        from apps.inventory.models import Product
+        from apps.purchases.models import Supplier
+
+        product = Product.objects.create(owner_business=self.ho, stock_no="P-1", name="Oil", unit="ltr")
+        supplier = Supplier.objects.create(business=self.ho, name="Himal Traders")
+        made = self.client.post(
+            "/api/v1/purchases/",
+            {
+                "supplier": supplier.pk,
+                "purchase_date": str(day(-5)),
+                "due_date": str(day(due_in)),
+                "items": [{"product": product.pk, "quantity": "2", "unit_price": "100.00"}],
+            },
+            format="json",
+        ).json()
+
+        if receive:
+            self.client.post(f"/api/v1/purchases/{made['id']}/receive/", {}, format="json")
+
+        return made
+
+    def test_three_days_before_on_the_day_and_when_late(self):
+        from apps.notifications.services import generate_payables
+
+        self.purchase(due_in=3)
+
+        for offset in (0, 3, 5):
+            generate_payables(self.ho, today=day(offset))
+
+        kinds = list(Notification.objects.order_by("id").values_list("kind", flat=True))
+        self.assertEqual(kinds, ["payable_soon", "payable_due", "payable_overdue"])
+        first = Notification.objects.order_by("id").first()
+        self.assertIn("Himal Traders", first.title)
+        self.assertIn("due in 3 days", first.title)
+        self.assertIn("/dashboard/purchase/detail?id=", first.link)
+
+    def test_nothing_before_the_window_or_before_the_goods_arrive(self):
+        from apps.notifications.services import generate_payables
+
+        self.purchase(due_in=4)
+        self.assertEqual(generate_payables(self.ho), 0)
+
+        Notification.objects.all().delete()
+
+    def test_a_purchase_not_yet_received_is_not_a_payable(self):
+        from apps.notifications.services import generate_payables
+
+        self.purchase(due_in=1, receive=False)
+
+        self.assertEqual(generate_payables(self.ho), 0)
+
+    def test_it_disappears_once_paid_up_and_reaches_only_the_right_people(self):
+        from apps.notifications.services import generate_payables
+
+        made = self.purchase(due_in=1)
+        generate_payables(self.ho)
+        manager = self.make_position(self.ho, "Stock lead", inventory=("view", "update"))
+        plain = self.make_position(self.ho, "Cashier", sales=("view", "create"))
+        self.make_user("stock", User.Role.STAFF, company=self.company, position=manager)
+        self.make_user("plain", User.Role.STAFF, company=self.company, position=plain)
+
+        self.assertEqual(len(self.notes()["results"]), 1)  # the owner
+        self.authenticate("ACME-HO", "stock")
+        self.assertEqual(len(self.notes()["results"]), 1)
+        self.authenticate("ACME-HO", "plain")
+        self.assertEqual(self.notes()["results"], [])
+
+        self.authenticate("ACME-HO", "owner")
+        paid = self.client.post(
+            "/api/v1/purchases/payments/",
+            {"purchase": made["id"], "amount": "200.00", "method": "cash"},
+            format="json",
+        )
+        self.assertEqual(paid.status_code, 201, paid.content)
+        self.assertEqual(self.notes()["results"], [])

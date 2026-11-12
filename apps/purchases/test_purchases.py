@@ -864,3 +864,53 @@ class ModelTests(PurchaseTestCase):
                 business=self.ho, number=1, supplier=self.supplier,
                 purchase_date=timezone.localdate(),
             )
+
+
+class DueDateTests(PurchaseTestCase):
+    def day(self, offset):
+        return timezone.localdate() + timezone.timedelta(days=offset)
+
+    def test_a_purchase_can_carry_a_payment_due_date(self):
+        purchase = self.made(due_date=str(self.day(10)))
+
+        self.assertEqual(purchase["due_date"], str(self.day(10)))
+
+    def test_the_due_date_cannot_be_before_the_purchase_date(self):
+        response = self.client.post(
+            BASE,
+            {
+                "supplier": self.supplier.pk,
+                "purchase_date": str(self.day(0)),
+                "due_date": str(self.day(-1)),
+                "items": [self.line()],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("due_date", response.json())
+
+    def test_it_can_be_set_and_cleared_after_the_goods_arrive(self):
+        purchase = self.made()
+        self.receive(purchase["id"])
+
+        set_ = self.client.post(
+            f"{BASE}{purchase['id']}/due-date/", {"due_date": str(self.day(7))}, format="json"
+        )
+        cleared = self.client.post(
+            f"{BASE}{purchase['id']}/due-date/", {"due_date": None}, format="json"
+        )
+
+        self.assertEqual(set_.status_code, 200, set_.content)
+        self.assertEqual(set_.json()["due_date"], str(self.day(7)))
+        self.assertIsNone(cleared.json()["due_date"])
+
+    def test_a_cancelled_purchase_has_nothing_to_pay(self):
+        purchase = self.made()
+        self.client.post(f"{BASE}{purchase['id']}/cancel/", {"reason": "mistake"}, format="json")
+
+        response = self.client.post(
+            f"{BASE}{purchase['id']}/due-date/", {"due_date": str(self.day(7))}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 400)

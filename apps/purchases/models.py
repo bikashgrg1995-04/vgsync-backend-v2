@@ -94,6 +94,8 @@ class Purchase(models.Model):
     # The supplier's own bill or invoice number.
     bill_no = models.CharField(max_length=60, blank=True)
     purchase_date = models.DateField()
+    # When the supplier expects to be paid (credit purchases).
+    due_date = models.DateField(null=True, blank=True)
 
     status = models.CharField(
         max_length=10,
