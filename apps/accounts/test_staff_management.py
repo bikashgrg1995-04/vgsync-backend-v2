@@ -423,6 +423,32 @@ class StaffLifecycleTests(StaffManagementTestCase):
         revoked = self.client.post(REFRESH_URL, {"refresh": refresh}, format="json")
         self.assertEqual(revoked.status_code, 401)
 
+    def test_removing_one_staff_leaves_the_position_and_the_others_alone(self):
+        from apps.tasks.models import Task
+
+        other = self.create_staff(username="sita", first_name="Sita").data["id"]
+        task = Task.objects.create(
+            business=self.ho,
+            title="Left behind",
+            assigned_by=User.objects.get(pk=self.staff_id),
+            assigned_to=User.objects.get(pk=other),
+        )
+        permissions = self.position.permissions.count()
+
+        self.assertEqual(self.client.delete(self.url).status_code, 204)
+
+        self.position.refresh_from_db()
+        self.assertEqual(self.position.permissions.count(), permissions)
+        self.assertTrue(User.objects.get(pk=other).is_active)
+        self.assertEqual(User.objects.get(pk=other).position_id, self.position.pk)
+
+        # What they created is still there, still theirs, and the person is
+        # kept (as former staff) rather than erased.
+        former = User.objects.get(pk=self.staff_id)
+        task.refresh_from_db()
+        self.assertEqual(task.assigned_by_id, former.pk)
+        self.assertEqual(former.position_id, self.position.pk)
+
     def test_deleting_twice_is_not_an_error(self):
         self.client.delete(self.url)
 
