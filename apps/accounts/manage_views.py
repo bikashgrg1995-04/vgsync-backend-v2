@@ -132,8 +132,12 @@ class StaffViewSet(viewsets.ModelViewSet):
         # they stay signed in; the new rules apply on their next request
         # because access is re-checked against the database every time.
         user.refresh_from_db()
+        data = StaffSerializer(user).data
 
-        return Response(StaffSerializer(user).data)
+        if getattr(serializer, "temporary_password", None):
+            data["temporary_password"] = serializer.temporary_password
+
+        return Response(data)
 
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
@@ -162,7 +166,7 @@ class StaffViewSet(viewsets.ModelViewSet):
     def reactivate(self, request, pk=None):
         user = self.get_object()
 
-        if user.role == User.Role.STAFF and (
+        if user.role == User.Role.STAFF and user.can_sign_in and (
             not user.position_id or not user.position.is_active
         ):
             raise Conflict(
@@ -223,6 +227,12 @@ class StaffViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
         user = self.get_object()
+
+        if not user.can_sign_in:
+            raise Conflict(
+                "This person does not sign in. Give sign-in access first.",
+                code="no_sign_in",
+            )
 
         serializer = ResetPasswordSerializer(
             data=request.data,

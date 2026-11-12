@@ -196,6 +196,7 @@ class VGSyncTokenObtainPairSerializer(TokenObtainPairSerializer):
             .filter(
                 username=username,
                 is_active=True,
+                can_sign_in=True,
             )
             .exclude(
                 role=User.Role.SUPER_ADMIN,
@@ -281,6 +282,7 @@ class VGSyncTokenRefreshSerializer(TokenRefreshSerializer):
         if (
             not user
             or not user.is_active
+            or not user.can_sign_in
             or user.role == User.Role.SUPER_ADMIN
         ):
             raise InvalidToken(
@@ -507,7 +509,7 @@ class ForgotPasswordSerializer(serializers.Serializer):
 
         users = (
             User.objects
-            .filter(username=username, is_active=True)
+            .filter(username=username, is_active=True, can_sign_in=True)
             .exclude(role=User.Role.SUPER_ADMIN)
         )
 
@@ -566,7 +568,7 @@ class ResetPasswordSerializer(serializers.Serializer):
 
         try:
             user_id = force_str(urlsafe_base64_decode(attrs["uid"]))
-            user = User.objects.get(pk=user_id, is_active=True)
+            user = User.objects.get(pk=user_id, is_active=True, can_sign_in=True)
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
             raise invalid
 

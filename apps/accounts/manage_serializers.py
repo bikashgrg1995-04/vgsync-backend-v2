@@ -4,6 +4,8 @@ Serializers for the owner's staff and Position management APIs.
 
 import secrets
 
+from django.utils.text import slugify
+
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
@@ -58,6 +60,7 @@ class StaffSerializer(serializers.ModelSerializer):
             "position_name",
             "is_active",
             "must_change_password",
+            "can_sign_in",
             "last_login",
             "date_joined",
         )
@@ -85,6 +88,8 @@ class _StaffInputSerializer(serializers.ModelSerializer):
         },
     )
 
+    can_sign_in = serializers.BooleanField(required=False)
+
     class Meta:
         model = User
         fields = (
@@ -94,6 +99,7 @@ class _StaffInputSerializer(serializers.ModelSerializer):
             "phone",
             "role",
             "position",
+            "can_sign_in",
         )
 
     def __init__(self, *args, **kwargs):
@@ -153,8 +159,14 @@ class _StaffInputSerializer(serializers.ModelSerializer):
         else:
             position = instance.position if instance else None
 
+        signs_in = attrs.get(
+            "can_sign_in", instance.can_sign_in if instance else True
+        )
+
         if role == User.Role.STAFF:
-            if position is None:
+            # Someone who never signs in needs no position: there is nothing
+            # for it to give them access to.
+            if position is None and signs_in:
                 raise serializers.ValidationError(
                     {"position": "Staff must be assigned a position."}
                 )
@@ -174,6 +186,11 @@ class _StaffInputSerializer(serializers.ModelSerializer):
 class StaffCreateSerializer(_StaffInputSerializer):
     role = serializers.ChoiceField(
         choices=ROLE_CHOICES, required=False, default=User.Role.STAFF
+    )
+
+    # Left out only for someone who never signs in; a name is made up then.
+    username = serializers.CharField(
+        max_length=150, required=False, validators=User._meta.get_field("username").validators
     )
 
     password = serializers.CharField(
@@ -204,6 +221,20 @@ class StaffCreateSerializer(_StaffInputSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
+        signs_in = attrs.get("can_sign_in", True)
+
+        if not signs_in:
+            if attrs.get("password"):
+                raise serializers.ValidationError(
+                    {"password": "This person does not sign in, so there is no password."}
+                )
+
+            attrs["can_sign_in"] = False
+        elif not attrs.get("username"):
+            raise serializers.ValidationError(
+                {"username": "Enter a username for the person to sign in with."}
+            )
+
         password = attrs.get("password")
 
         if password is not None:
@@ -225,11 +256,35 @@ class StaffCreateSerializer(_StaffInputSerializer):
 
         return attrs
 
+    def to_internal_value(self, data):
+        # The database rule on usernames wants one even for someone who
+        # never signs in, so make one up before the checks run.
+        flag = data.get("can_sign_in") if hasattr(data, "get") else None
+        off = flag is False or str(flag).lower() in ("false", "0")
+
+        if off and not data.get("username"):
+            data = data.copy()
+            data["username"] = self._made_up_username(
+                {"first_name": data.get("first_name", "")}
+            )
+
+        return super().to_internal_value(data)
+
+    def _made_up_username(self, attrs):
+        """A name for someone who never signs in, unique in the organisation."""
+        base = slugify(attrs.get("first_name", "")) or "staff"
+
+        while True:
+            name = f"{base}-{secrets.token_hex(2)}"
+
+            if not username_taken(self.business, name):
+                return name
+
     def create(self, validated_data):
         business = self.business
 
         password = validated_data.pop("password", None)
-        generated = password is None
+        generated = password is None and validated_data.get("can_sign_in", True)
 
         if generated:
             password = generate_temporary_password()
@@ -243,8 +298,11 @@ class StaffCreateSerializer(_StaffInputSerializer):
         else:
             user.business = business
 
-        user.set_password(password)
-        user.must_change_password = True
+        if validated_data.get("can_sign_in", True):
+            user.set_password(password)
+            user.must_change_password = True
+        else:
+            user.set_unusable_password()
 
         try:
             with transaction.atomic():
@@ -263,11 +321,25 @@ class StaffCreateSerializer(_StaffInputSerializer):
 class StaffUpdateSerializer(_StaffInputSerializer):
     """Edit details or assign a position. Username is fixed."""
 
+    temporary_password = None
+
     @transaction.atomic
     def update(self, instance, validated_data):
         old_position_id = instance.position_id
+        was_signing_in = instance.can_sign_in
 
         user = super().update(instance, validated_data)
+
+        if user.can_sign_in and not was_signing_in:
+            # Sign-in access given later: a one-time password, to be changed.
+            self.temporary_password = generate_temporary_password()
+            user.set_password(self.temporary_password)
+            user.must_change_password = True
+            user.save(update_fields=["password", "must_change_password"])
+        elif was_signing_in and not user.can_sign_in:
+            user.set_unusable_password()
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
 
         # A new Position starts clean: one-person exceptions made for the
         # old Position are not carried over silently.

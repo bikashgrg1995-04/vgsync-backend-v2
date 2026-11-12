@@ -116,7 +116,7 @@ class TaskViewSet(viewsets.ModelViewSet):
     def _assignee(self, user_id):
         assignee = (
             scoped_users(self.request.active_business)
-            .filter(pk=user_id, is_active=True)
+            .filter(pk=user_id, is_active=True, can_sign_in=True)
             .first()
         )
 
@@ -221,7 +221,8 @@ class TaskViewSet(viewsets.ModelViewSet):
     def assignees(self, request):
         """Who a task can be handed to."""
         self._need("tasks.create")
-        users = scoped_users(request.active_business).filter(is_active=True).select_related("position")
+        # Someone who never signs in cannot be handed work.
+        users = scoped_users(request.active_business).filter(is_active=True, can_sign_in=True).select_related("position")
 
         return Response([person(u) for u in users.order_by("first_name", "username")])
 

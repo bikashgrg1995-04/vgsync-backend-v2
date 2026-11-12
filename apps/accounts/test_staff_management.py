@@ -695,3 +695,98 @@ class PositionTests(StaffManagementTestCase):
             {item["module"] for item in response.data},
             {value for value, _ in PositionPermission.Module.choices},
         )
+
+
+class NoSignInStaffTests(StaffManagementTestCase):
+    """Someone kept in the records who never uses the system."""
+
+    def worker(self, **extra):
+        payload = {
+            "first_name": "Hari", "last_name": "Daily", "role": "staff",
+            "can_sign_in": False, **extra,
+        }
+
+        return self.client.post(STAFF_URL, payload, format="json")
+
+    def test_created_without_a_login_a_position_or_a_password(self):
+        response = self.worker()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(response.data["can_sign_in"])
+        self.assertNotIn("temporary_password", response.data)
+        self.assertIsNone(response.data["position"])
+        user = User.objects.get(pk=response.data["id"])
+        self.assertFalse(user.has_usable_password())
+        self.assertTrue(user.username.startswith("hari-"))
+        self.assertFalse(user.must_change_password)
+
+    def test_they_cannot_sign_in(self):
+        response = self.worker(username="hari")
+
+        self.assertEqual(self.login("ACME-HO", response.data["username"], "anything").status_code, 400)
+
+    def test_a_password_makes_no_sense_for_them(self):
+        self.assertEqual(self.worker(password="Str0ng!Passw0rd").status_code, 400)
+
+    def test_someone_who_signs_in_still_needs_a_username_and_position(self):
+        self.assertEqual(
+            self.client.post(STAFF_URL, {"first_name": "A", "role": "staff", "position": self.position.pk}, format="json").status_code,
+            400,
+        )
+        self.assertEqual(self.create_staff(position=None).status_code, 400)
+
+    def test_their_pay_can_be_kept(self):
+        staff_id = self.worker().data["id"]
+
+        response = self.client.put(
+            f"/api/v1/payroll/salaries/{staff_id}/", {"pay_type": "daily", "rate": "800.00"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_sign_in_can_be_given_later_with_a_position(self):
+        staff_id = self.worker().data["id"]
+
+        without = self.client.patch(f"{STAFF_URL}{staff_id}/", {"can_sign_in": True}, format="json")
+        self.assertEqual(without.status_code, 400)
+
+        given = self.client.patch(
+            f"{STAFF_URL}{staff_id}/", {"can_sign_in": True, "position": self.position.pk}, format="json"
+        )
+
+        self.assertEqual(given.status_code, 200, given.data)
+        temporary = given.data["temporary_password"]
+        username = given.data["username"]
+        login = self.login("ACME-HO", username, temporary)
+        self.assertEqual(login.status_code, 200, login.data)
+        self.assertTrue(login.data["user"]["must_change_password"])
+
+    def test_sign_in_can_be_stopped_and_records_stay(self):
+        created = self.create_staff()
+        staff_id = created.data["id"]
+        temporary = created.data["temporary_password"]
+
+        stopped = self.client.patch(f"{STAFF_URL}{staff_id}/", {"can_sign_in": False}, format="json")
+
+        self.assertEqual(stopped.status_code, 200, stopped.data)
+        self.assertEqual(self.login("ACME-HO", "ram", temporary).status_code, 400)
+        self.assertTrue(User.objects.filter(pk=staff_id, is_active=True).exists())
+
+    def test_no_password_reset_and_no_tasks_for_them(self):
+        staff_id = self.worker().data["id"]
+
+        reset = self.client.post(f"{STAFF_URL}{staff_id}/reset-password/", {}, format="json")
+        self.assertEqual(reset.status_code, 409)
+        self.assertEqual(reset.data["code"], "no_sign_in")
+
+        assignees = self.client.get("/api/v1/tasks/assignees/").json()
+        self.assertNotIn(staff_id, [p["id"] for p in assignees])
+
+    def test_they_can_be_removed_and_brought_back_without_a_position(self):
+        staff_id = self.worker().data["id"]
+
+        self.assertEqual(self.client.delete(f"{STAFF_URL}{staff_id}/").status_code, 204)
+        back = self.client.post(f"{STAFF_URL}{staff_id}/reactivate/")
+
+        self.assertEqual(back.status_code, 200, back.data)
+        self.assertTrue(back.data["is_active"])

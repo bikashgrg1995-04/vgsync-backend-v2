@@ -208,6 +208,9 @@ class User(AbstractUser):
     phone = models.CharField(max_length=20, blank=True)
 
     must_change_password = models.BooleanField(default=False)
+    # False for a team member who only exists in the records (a daily
+    # worker, say): they never sign in, but their pay and history are kept.
+    can_sign_in = models.BooleanField(default=True)
 
     objects = VGSyncUserManager()
 
