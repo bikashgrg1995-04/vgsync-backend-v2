@@ -293,7 +293,9 @@ class PositionViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         position = self.get_object()
 
-        assigned = position.users.count()
+        # Only people who can still log in hold a position in use. Those who
+        # were switched off just lose it; their records are untouched.
+        assigned = position.users.filter(is_active=True).count()
 
         if assigned:
             raise Conflict(
@@ -302,7 +304,9 @@ class PositionViewSet(viewsets.ModelViewSet):
                 code="position_in_use",
             )
 
-        position.delete()
+        with transaction.atomic():
+            position.users.filter(is_active=False).update(position=None)
+            position.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 

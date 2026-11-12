@@ -593,6 +593,23 @@ class PositionTests(StaffManagementTestCase):
         self.assertEqual(response.data["code"], "position_in_use")
         self.assertTrue(Position.objects.filter(pk=self.position.pk).exists())
 
+    def test_deactivated_staff_do_not_block_deleting_a_position(self):
+        created = self.create_staff()
+        staff_id = created.data["id"]
+        self.client.delete(f"{STAFF_URL}{staff_id}/")
+
+        response = self.client.delete(f"{POSITIONS_URL}{self.position.pk}/")
+
+        self.assertEqual(response.status_code, 204)
+        staff = User.objects.get(pk=staff_id)
+        self.assertFalse(staff.is_active)
+        self.assertIsNone(staff.position)
+
+        # They come back only once given a position again.
+        again = self.client.post(f"{STAFF_URL}{staff_id}/reactivate/")
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(again.data["code"], "position_required")
+
     def test_unused_position_can_be_deleted(self):
         spare = self.make_position(self.ho, "Spare")
 
