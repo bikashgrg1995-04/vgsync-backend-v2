@@ -20,6 +20,12 @@ class Task(models.Model):
         NORMAL = "normal", "Normal"
         HIGH = "high", "High"
 
+    class Repeat(models.TextChoices):
+        NONE = "none", "Does not repeat"
+        DAILY = "daily", "Every day"
+        WEEKLY = "weekly", "Every week"
+        MONTHLY = "monthly", "Every month"
+
     business = models.ForeignKey(
         "businesses.Business", on_delete=models.PROTECT, related_name="tasks"
     )
@@ -40,6 +46,11 @@ class Task(models.Model):
         max_length=12, choices=Status.choices, default=Status.TODO
     )
     due_date = models.DateField(null=True, blank=True)
+    # Repeating work: finishing it makes the next one (see services).
+    repeat = models.CharField(
+        max_length=10, choices=Repeat.choices, default=Repeat.NONE
+    )
+    repeat_made = models.BooleanField(default=False)
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
@@ -83,6 +94,27 @@ class TaskEvent(models.Model):
     from_status = models.CharField(max_length=12, blank=True)
     to_status = models.CharField(max_length=12, blank=True)
     note = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+
+
+class TaskAttachment(models.Model):
+    """A file kept on a task (a photo, a bill, a document)."""
+
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name="attachments"
+    )
+    file = models.FileField(upload_to="tasks/attachments/")
+    original_name = models.CharField(max_length=255)
+    size = models.PositiveIntegerField(default=0)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="+",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

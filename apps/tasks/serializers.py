@@ -1,7 +1,7 @@
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Task, TaskEvent
+from .models import Task, TaskAttachment, TaskEvent
 
 
 def person(user):
@@ -26,7 +26,22 @@ class TaskEventSerializer(serializers.ModelSerializer):
         )
 
 
+class TaskAttachmentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TaskAttachment
+        fields = ("id", "original_name", "size", "uploaded_by_name", "created_at")
+
+    def get_uploaded_by_name(self, obj):
+        user = obj.uploaded_by
+
+        return (user.get_full_name() or user.username) if user else ""
+
+
 class TaskSerializer(serializers.ModelSerializer):
+    repeat_label = serializers.CharField(source="get_repeat_display", read_only=True)
+    attachment_count = serializers.SerializerMethodField()
     status_label = serializers.CharField(source="get_status_display", read_only=True)
     priority_label = serializers.CharField(source="get_priority_display", read_only=True)
     assigned_to = serializers.SerializerMethodField()
@@ -45,6 +60,9 @@ class TaskSerializer(serializers.ModelSerializer):
             "priority",
             "priority_label",
             "due_date",
+            "repeat",
+            "repeat_label",
+            "attachment_count",
             "is_overdue",
             "assigned_to",
             "assigned_by",
@@ -61,6 +79,11 @@ class TaskSerializer(serializers.ModelSerializer):
 
     def get_assigned_by(self, obj):
         return person(obj.assigned_by)
+
+    def get_attachment_count(self, obj):
+        total = getattr(obj, "attachment_total", None)
+
+        return obj.attachments.count() if total is None else total
 
     def get_is_overdue(self, obj):
         return bool(obj.is_open and obj.due_date and obj.due_date < timezone.localdate())
@@ -80,6 +103,7 @@ class TaskWriteSerializer(serializers.Serializer):
     description = serializers.CharField(allow_blank=True, required=False)
     priority = serializers.ChoiceField(choices=Task.Priority.choices, required=False)
     due_date = serializers.DateField(allow_null=True, required=False)
+    repeat = serializers.ChoiceField(choices=Task.Repeat.choices, required=False)
     assigned_to = serializers.IntegerField()
 
 

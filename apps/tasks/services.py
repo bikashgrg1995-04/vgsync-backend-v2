@@ -3,6 +3,9 @@ What happens to a task: each step is written to its history and the right
 people are told. Nothing here checks who is allowed; the view does.
 """
 
+import calendar
+from datetime import timedelta
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -32,6 +35,52 @@ def _tell(task, recipient, actor, kind, title, body=""):
         return
 
     notify(task.business, recipient, kind, title, body, task=task, link=_link(task))
+
+
+def next_due(due, repeat, today):
+    """The next date in the cycle after ``due``, never in the past."""
+    def step(day):
+        if repeat == Task.Repeat.DAILY:
+            return day + timedelta(days=1)
+
+        if repeat == Task.Repeat.WEEKLY:
+            return day + timedelta(days=7)
+
+        month = day.month % 12 + 1
+        year = day.year + (day.month == 12)
+
+        return day.replace(
+            year=year, month=month,
+            day=min(day.day, calendar.monthrange(year, month)[1]),
+        )
+
+    following = step(due)
+
+    while following < today:
+        following = step(following)
+
+    return following
+
+
+def _repeat_if_due(task, actor):
+    """Finishing a repeating task makes the next one, once."""
+    if task.repeat == Task.Repeat.NONE or task.repeat_made or not task.due_date:
+        return
+
+    task.repeat_made = True
+    task.save(update_fields=["repeat_made"])
+    following = create_task(
+        task.business,
+        task.assigned_by,
+        task.assigned_to,
+        title=task.title,
+        description=task.description,
+        priority=task.priority,
+        repeat=task.repeat,
+        due_date=next_due(task.due_date, task.repeat, timezone.localdate()),
+    )
+    _event(task, actor, TaskEvent.Kind.COMMENT,
+           note=f"Repeats: next task due {following.due_date:%Y-%m-%d}")
 
 
 @transaction.atomic
@@ -135,6 +184,7 @@ def change_status(task, actor, status, note=""):
     label = task.get_status_display()
 
     if status == Task.Status.DONE:
+        _repeat_if_due(task, actor)
         _tell(
             task,
             task.assigned_by,
@@ -206,3 +256,26 @@ def generate_overdue(business, today=None):
             )
 
     return made
+
+
+@transaction.atomic
+def add_attachment(task, actor, upload):
+    from .models import TaskAttachment
+
+    item = TaskAttachment.objects.create(
+        task=task,
+        file=upload,
+        original_name=upload.name[:255],
+        size=upload.size,
+        uploaded_by=actor,
+    )
+    _event(task, actor, TaskEvent.Kind.COMMENT, note=f"Attached {item.original_name}")
+    task.save(update_fields=["updated_at"])
+
+    for person in {task.assigned_to, task.assigned_by}:
+        _tell(
+            task, person, actor, Notification.Kind.TASK_UPDATED,
+            f"File added to: {task.title}", item.original_name,
+        )
+
+    return item

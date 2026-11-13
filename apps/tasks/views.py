@@ -14,6 +14,7 @@ from apps.common.permissions import HasActiveBusinessContext
 from . import services
 from .models import Task
 from .serializers import (
+    TaskAttachmentSerializer,
     NoteSerializer,
     StatusSerializer,
     TaskEditSerializer,
@@ -21,6 +22,24 @@ from .serializers import (
     TaskWriteSerializer,
     person,
 )
+
+
+def _check_upload(upload):
+    from apps.accounts.manage_serializers import DOCUMENT_MAX_BYTES, DOCUMENT_TYPES
+
+    if upload is None:
+        raise ValidationError({"file": "Choose a file."})
+
+    extension = upload.name.rsplit(".", 1)[-1].lower() if "." in upload.name else ""
+
+    if extension not in DOCUMENT_TYPES:
+        raise ValidationError({"file": "Upload a PDF, image, Word, Excel or text file."})
+
+    if upload.size > DOCUMENT_MAX_BYTES:
+        raise ValidationError({"file": "The file must be 10 MB or smaller."})
+
+    if upload.size == 0:
+        raise ValidationError({"file": "The file is empty."})
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -68,7 +87,9 @@ class TaskViewSet(viewsets.ModelViewSet):
         user = self.request.user
         queryset = Task.objects.filter(
             business=self.request.active_business
-        ).select_related("assigned_to", "assigned_by", "assigned_to__position")
+        ).select_related("assigned_to", "assigned_by", "assigned_to__position").annotate(
+            attachment_total=Count("attachments", distinct=True)
+        )
 
         if not self._can("tasks.view"):
             queryset = queryset.filter(Q(assigned_to=user) | Q(assigned_by=user))
@@ -125,6 +146,11 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         return assignee
 
+    @staticmethod
+    def _check_repeat(repeat, due_date):
+        if repeat and repeat != Task.Repeat.NONE and not due_date:
+            raise ValidationError({"repeat": "Set a due date for a repeating task."})
+
     def _fresh(self, task):
         task = self.get_queryset().get(pk=task.pk)
 
@@ -140,6 +166,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         data.is_valid(raise_exception=True)
         fields = dict(data.validated_data)
         assignee = self._assignee(fields.pop("assigned_to"))
+        self._check_repeat(fields.get("repeat"), fields.get("due_date"))
 
         task = services.create_task(
             request.active_business, request.user, assignee, **fields
@@ -159,6 +186,11 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         if "assigned_to" in changes:
             changes["assigned_to"] = self._assignee(changes["assigned_to"])
+
+        self._check_repeat(
+            changes.get("repeat", task.repeat),
+            changes["due_date"] if "due_date" in changes else task.due_date,
+        )
 
         services.edit_task(task, request.user, changes)
 
@@ -202,6 +234,62 @@ class TaskViewSet(viewsets.ModelViewSet):
         services.add_comment(task, request.user, data.validated_data["note"])
 
         return self._fresh(task)
+
+    @action(detail=True, methods=["get", "post"])
+    def attachments(self, request, pk=None):
+        """``GET`` lists a task's files; ``POST`` (multipart ``file``) adds one."""
+        task = self.get_object()
+
+        if request.method == "GET":
+            return Response(
+                TaskAttachmentSerializer(
+                    task.attachments.select_related("uploaded_by"), many=True
+                ).data
+            )
+
+        self._writable()
+
+        if not (self._is_involved(task) or self._can("tasks.update")):
+            raise PermissionDenied("Only the people on this task can add files.")
+
+        if task.status == Task.Status.CANCELLED:
+            raise ValidationError({"detail": "This task was cancelled."})
+
+        upload = request.FILES.get("file")
+        _check_upload(upload)
+        item = services.add_attachment(task, request.user, upload)
+
+        return Response(
+            TaskAttachmentSerializer(item).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(
+        detail=True,
+        methods=["get", "delete"],
+        url_path=r"attachments/(?P<attachment_id>\d+)",
+    )
+    def attachment(self, request, pk=None, attachment_id=None):
+        """``GET`` downloads a file (sign-in required); ``DELETE`` removes it."""
+        from django.http import FileResponse
+        from django.shortcuts import get_object_or_404
+
+        task = self.get_object()
+        item = get_object_or_404(task.attachments, pk=attachment_id)
+
+        if request.method == "DELETE":
+            self._writable()
+
+            if not (item.uploaded_by_id == request.user.pk or self._can("tasks.update")):
+                raise PermissionDenied("Only who added it can remove this file.")
+
+            item.file.delete(save=False)
+            item.delete()
+
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        return FileResponse(
+            item.file.open("rb"), as_attachment=True, filename=item.original_name
+        )
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
