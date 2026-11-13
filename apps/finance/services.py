@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.utils import timezone
 
 from .models import Expense, Income
@@ -95,3 +97,49 @@ def void_sale_income(payment, actor, reason):
         voided_at=timezone.now(),
         void_reason=reason,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cash and bank balances
+# ---------------------------------------------------------------------------
+
+def method_balance(business, method, as_of):
+    """
+    What the books say the business holds in ``method`` at the end of ``as_of``:
+    the opening balance, plus money received and less money paid after it.
+    Voided entries are left out.
+    """
+    from django.db.models import Sum
+    from rest_framework.exceptions import ValidationError
+
+    from .models import Expense, Income, OpeningBalance
+
+    opening = OpeningBalance.objects.filter(business=business, method=method).first()
+    base = opening.amount if opening else Decimal("0")
+
+    if opening and as_of < opening.as_of:
+        raise ValidationError(
+            {"as_of": f"The opening balance is as at {opening.as_of}; choose that date or later."}
+        )
+
+    money_in = Income.objects.filter(
+        business=business, payment_method=method, status="active", income_date__lte=as_of
+    )
+    money_out = Expense.objects.filter(
+        business=business, payment_method=method, status="active", expense_date__lte=as_of
+    )
+
+    if opening:
+        money_in = money_in.filter(income_date__gt=opening.as_of)
+        money_out = money_out.filter(expense_date__gt=opening.as_of)
+
+    received = money_in.aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    paid = money_out.aggregate(t=Sum("amount"))["t"] or Decimal("0")
+
+    return {
+        "opening": base,
+        "opening_as_of": opening.as_of if opening else None,
+        "received": received,
+        "paid": paid,
+        "expected": base + received - paid,
+    }

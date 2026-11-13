@@ -2,6 +2,9 @@ from django.urls import path
 
 from apps.inventory.views import (
     ProductDetailView,
+    ProductExportView,
+    ProductImportView,
+    ProductTemplateView,
     ProductListCreateView,
     StockDetailView,
     StockListView,
@@ -25,6 +28,9 @@ app_name = "inventory"
 urlpatterns = [
     # Products
     path("products/", ProductListCreateView.as_view(), name="product-list-create"),
+    path("products/export/", ProductExportView.as_view(), name="product-export"),
+    path("products/import/", ProductImportView.as_view(), name="product-import"),
+    path("products/import-template/", ProductTemplateView.as_view(), name="product-import-template"),
     path("products/<int:pk>/", ProductDetailView.as_view(), name="product-detail"),
 
     # Current business stock

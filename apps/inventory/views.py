@@ -477,3 +477,73 @@ class StockMovementDetailView(InventoryBaseView):
         serializer = StockMovementSerializer(movement)
 
         return Response(serializer.data)
+
+
+# ==================================================
+# IMPORT / EXPORT
+# ==================================================
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _file(body, name):
+    from django.http import HttpResponse
+
+    response = HttpResponse(body, content_type=XLSX)
+    response["Content-Disposition"] = f'attachment; filename="{name}"'
+
+    return response
+
+
+class ProductExportView(InventoryBaseView):
+    """Every product with its stock here, as an Excel file that imports back."""
+
+    def get(self, request):
+        from django.utils import timezone
+
+        from apps.inventory.services import importing
+
+        body = importing.export_products(request.active_business)
+
+        return _file(body, f"products-{timezone.localdate():%Y%m%d}.xlsx")
+
+
+class ProductTemplateView(InventoryBaseView):
+    def get(self, request):
+        from apps.inventory.services import importing
+
+        return _file(importing.template(), "product-import-template.xlsx")
+
+
+class ProductImportView(InventoryBaseView):
+    """
+    ``POST`` a file (``file``). Without ``apply=true`` it only checks and
+    reports; with it, a clean file is saved. ``mode=prices`` changes MRP and
+    prices of existing products only.
+    """
+
+    def post(self, request):
+        from apps.inventory.services import importing
+
+        mode = request.data.get("mode") or "products"
+
+        if mode not in ("products", "prices"):
+            raise ValidationError({"mode": "Use products or prices."})
+
+        apply = str(request.data.get("apply", "")).lower() == "true"
+
+        # Adding products needs ``create``; changing existing ones ``update``.
+        can_update = rbac.has_permission(
+            request.user, "inventory.update", getattr(request, "access_mode", "full")
+        )
+
+        if mode == "prices" and not can_update:
+            raise PermissionDenied("You do not have permission to change prices.")
+
+        result = importing.run(
+            request.user, request.active_business, request.FILES.get("file"),
+            mode=mode, apply=apply, can_update=can_update,
+        )
+        result["applied"] = bool(apply and not result["errors"])
+
+        return Response(result)

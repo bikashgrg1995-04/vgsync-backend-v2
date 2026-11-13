@@ -198,3 +198,56 @@ class Income(models.Model):
 
     def __str__(self):
         return f"{self.category} {self.amount} on {self.income_date}"
+
+
+class OpeningBalance(models.Model):
+    """
+    What the business held in one payment method (cash, bank...) at the end
+    of ``as_of``. Money in and out after that date is added to it.
+    """
+
+    business = models.ForeignKey(
+        "businesses.Business", on_delete=models.PROTECT, related_name="opening_balances"
+    )
+    method = models.CharField(max_length=10, choices=Expense.Method.choices)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    as_of = models.DateField()
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["business", "method"], name="one_opening_balance_per_method"
+            )
+        ]
+
+
+class Reconciliation(models.Model):
+    """
+    A check of the books against reality: what the system expected in a
+    method on ``as_of`` against what was counted (cash in the drawer, the
+    bank statement). Kept as history; never edited.
+    """
+
+    business = models.ForeignKey(
+        "businesses.Business", on_delete=models.PROTECT, related_name="reconciliations"
+    )
+    method = models.CharField(max_length=10, choices=Expense.Method.choices)
+    as_of = models.DateField()
+    expected = models.DecimalField(max_digits=14, decimal_places=2)
+    counted = models.DecimalField(max_digits=14, decimal_places=2)
+    difference = models.DecimalField(max_digits=14, decimal_places=2)
+    note = models.CharField(max_length=200, blank=True)
+    # Set when the difference was written into the books as an entry.
+    adjusted = models.BooleanField(default=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-as_of", "-id"]
+        indexes = [models.Index(fields=["business", "method", "as_of"])]

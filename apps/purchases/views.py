@@ -290,7 +290,11 @@ class SupplierViewSet(PurchaseBaseViewSet):
 # ---------------------------------------------------------------------------
 
 class PurchaseViewSet(PurchaseBaseViewSet):
-    permission_actions = {"receive": "receive", "due_date": "update"}
+    permission_actions = {
+        "receive": "receive",
+        "due_date": "update",
+        "import_lines": "create",
+    }
     """
     Purchases of the active business.
 
@@ -386,6 +390,66 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         fresh = self.get_queryset().get(pk=purchase.pk)
 
         return Response(PurchaseDetailSerializer(fresh).data, status=code)
+
+    @action(detail=False, methods=["post"], url_path="import-lines")
+    def import_lines(self, request):
+        """
+        Read order lines from an Excel or CSV file (Stock No, Quantity and an
+        optional Unit Price, which defaults to the product's purchase price).
+        Nothing is saved: the lines come back for the form to create a draft
+        purchase through the normal create, with its approval check.
+        """
+        from apps.inventory.services import importing
+        from apps.inventory.services.products import get_products_for_business
+
+        _, rows = importing.read_rows(request.FILES.get("file"))
+
+        if not rows or "stock_no" not in rows[0] or "quantity" not in rows[0]:
+            raise ValidationError({"file": "The file needs Stock No and Quantity columns."})
+
+        catalogue = {p.stock_no.lower(): p for p in get_products_for_business(request.active_business)}
+        lines, errors, seen = [], [], {}
+
+        for row in rows:
+            number, problems = row["_row"], []
+            raw = row.get("stock_no")
+            stock_no = str(int(raw) if isinstance(raw, float) and raw.is_integer() else raw or "").strip()
+            product = catalogue.get(stock_no.lower())
+
+            if not stock_no:
+                problems.append("Stock No is missing.")
+            elif product is None:
+                problems.append(f"No product has Stock No {stock_no}.")
+            elif stock_no.lower() in seen:
+                problems.append(f"Stock No {stock_no} is also on row {seen[stock_no.lower()]}.")
+            else:
+                seen[stock_no.lower()] = number
+
+            quantity = importing._decimal(row.get("quantity"), "Quantity", problems, places=3)
+
+            if quantity is not None and quantity <= 0:
+                problems.append("Quantity must be more than zero.")
+            elif quantity is None and not any("Quantity" in m for m in problems):
+                problems.append("Quantity is missing.")
+
+            price = importing._decimal(row.get("purchase_price"), "Unit price", problems, places=2)
+
+            if product is not None and not any("Unit price" in m for m in problems):
+                if (price if price is not None else product.purchase_price) <= 0:
+                    problems.append("Unit price is missing and the product has no purchase price.")
+
+            if problems:
+                errors.extend({"row": number, "message": m} for m in problems)
+            else:
+                lines.append({
+                    "product": product.pk,
+                    "stock_no": product.stock_no,
+                    "name": product.name,
+                    "quantity": f"{quantity:.3f}",
+                    "unit_price": f"{(price if price is not None else product.purchase_price):.2f}",
+                })
+
+        return Response({"lines": [] if errors else lines, "errors": errors})
 
     def create(self, request, *args, **kwargs):
         serializer = PurchaseWriteSerializer(

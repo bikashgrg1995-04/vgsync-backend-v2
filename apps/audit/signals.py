@@ -48,6 +48,8 @@ TRACKED = {
     "sales.SaleCreditSettlement": True,
     "finance.Expense": True,
     "finance.Income": True,
+    "finance.OpeningBalance": True,
+    "finance.Reconciliation": True,
     "payroll.PayrollPayment": True,
     "payroll.SalaryProfile": True,
     "accounts.User": True,
