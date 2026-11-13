@@ -46,6 +46,33 @@ class DashboardTests(TenantTestMixin, APITestCase):
         self.assertEqual(data["income_month"], "1500.00")
         self.assertEqual(data["profit_month"], "1300.00")
 
+    def test_the_opening_balance_is_part_of_cash_and_bank(self):
+        from datetime import timedelta
+
+        from apps.finance.models import OpeningBalance
+
+        today = date.today()
+        OpeningBalance.objects.create(
+            business=self.ho, method="cash", amount="5000", as_of=today - timedelta(days=2)
+        )
+        Income.objects.create(
+            business=self.ho, category="other", amount="1000",
+            income_date=today - timedelta(days=9), payment_method="cash",
+        )
+        Income.objects.create(
+            business=self.ho, category="other", amount="300",
+            income_date=today, payment_method="cash",
+        )
+        Income.objects.create(
+            business=self.ho, category="other", amount="40", income_date=today,
+        )
+        self.authenticate("ACME-HO", "owner")
+
+        data = self.client.get(URL).data["cash"]
+
+        # 1000 was before the opening date, so it is already inside the 5000.
+        self.assertEqual((data["cash"], data["other"], data["total"]), ("5300.00", "40.00", "5340.00"))
+
     def test_pending_approvals_raise_an_alert(self):
         ApprovalRequest.objects.create(
             business=self.ho, kind=Kind.EXPENSE, amount="5000",

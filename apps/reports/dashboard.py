@@ -25,23 +25,28 @@ def _sum(queryset, field):
 
 
 def _cash_position(business):
-    """Money in less money out, by how it was paid. Active entries only."""
-    methods = {}
+    """
+    What is held in cash and in the bank: the opening balance set under
+    Payments > Cash & bank, plus money in and less money out since. Entries
+    with no payment method are not in any balance and are kept under "other".
+    Active entries only.
+    """
+    from django.utils import timezone
+
+    from apps.finance.services import method_balance
+
+    today = timezone.localdate()
+    held = {m: method_balance(business, m, today)["expected"] for m in ("cash", "bank", "online", "cheque")}
+    unplaced = ZERO
 
     for model, sign in ((Income, 1), (Expense, -1)):
-        rows = (
-            model.objects.filter(business=business, status="active")
-            .values("payment_method")
-            .annotate(total=Sum("amount"))
+        unplaced += sign * _sum(
+            model.objects.filter(business=business, status="active", payment_method=""), "amount"
         )
 
-        for row in rows:
-            key = row["payment_method"] or "other"
-            methods[key] = methods.get(key, ZERO) + sign * row["total"]
-
-    cash = methods.pop("cash", ZERO)
-    bank = methods.pop("bank", ZERO) + methods.pop("online", ZERO)
-    other = sum(methods.values(), ZERO)
+    cash = held["cash"]
+    bank = held["bank"] + held["online"]
+    other = held["cheque"] + unplaced
 
     return {
         "cash": money(cash),
