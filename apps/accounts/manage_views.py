@@ -26,6 +26,8 @@ from .manage_serializers import (
     PositionSerializer,
     ResetPasswordSerializer,
     StaffCreateSerializer,
+    StaffDocumentSerializer,
+    StaffDocumentUploadSerializer,
     StaffOverridesSerializer,
     StaffSerializer,
     StaffUpdateSerializer,
@@ -54,6 +56,8 @@ class StaffViewSet(viewsets.ModelViewSet):
         "reactivate": "update",
         "reset_password": "update",
         "access": "view",
+        "documents": None,
+        "document": None,
     }
 
     def get_permissions(self):
@@ -223,6 +227,63 @@ class StaffViewSet(viewsets.ModelViewSet):
         data["position"] = user.position_id
 
         return Response(data)
+
+    @action(detail=True, methods=["get", "post"])
+    def documents(self, request, pk=None):
+        """``GET`` lists the person's files; ``POST`` (multipart) adds one."""
+        from .models import StaffDocument
+
+        user = self.get_object()
+
+        if request.method == "GET":
+            rows = user.documents.select_related("uploaded_by")
+
+            return Response(StaffDocumentSerializer(rows, many=True).data)
+
+        serializer = StaffDocumentUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        upload = serializer.validated_data["file"]
+
+        document = StaffDocument.objects.create(
+            business=request.active_business,
+            staff=user,
+            title=(serializer.validated_data.get("title") or "").strip()
+            or upload.name.rsplit(".", 1)[0][:150],
+            category=serializer.validated_data["category"],
+            file=upload,
+            original_name=upload.name[:255],
+            size=upload.size,
+            uploaded_by=request.user,
+        )
+
+        return Response(
+            StaffDocumentSerializer(document).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(
+        detail=True,
+        methods=["get", "delete"],
+        url_path=r"documents/(?P<document_id>\d+)",
+    )
+    def document(self, request, pk=None, document_id=None):
+        """``GET`` downloads one file (sign-in required); ``DELETE`` removes it."""
+        from django.http import FileResponse
+        from django.shortcuts import get_object_or_404
+
+        user = self.get_object()
+        document = get_object_or_404(user.documents, pk=document_id)
+
+        if request.method == "DELETE":
+            document.file.delete(save=False)
+            document.delete()
+
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        return FileResponse(
+            document.file.open("rb"),
+            as_attachment=True,
+            filename=document.original_name,
+        )
 
     @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):

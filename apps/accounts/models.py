@@ -362,3 +362,39 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.username
+
+
+class StaffDocument(models.Model):
+    """A file kept on a staff member's record (ID copy, contract, CV...)."""
+
+    class Category(models.TextChoices):
+        IDENTITY = "identity", "Identity"
+        CONTRACT = "contract", "Contract"
+        CV = "cv", "CV / Certificate"
+        OTHER = "other", "Other"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="staff_documents",
+    )
+    staff = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="documents"
+    )
+    title = models.CharField(max_length=150)
+    category = models.CharField(
+        max_length=20, choices=Category.choices, default=Category.OTHER
+    )
+    file = models.FileField(upload_to="staff/documents/")
+    original_name = models.CharField(max_length=255)
+    size = models.PositiveIntegerField(default=0)
+    uploaded_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.title} ({self.staff_id})"

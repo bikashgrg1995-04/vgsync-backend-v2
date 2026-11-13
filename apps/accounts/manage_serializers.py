@@ -625,3 +625,58 @@ class PositionSerializer(serializers.ModelSerializer):
             self._save_permissions(instance, permissions)
 
         return instance
+
+
+# ---------------------------------------------------------------------------
+# Documents kept on a staff record
+# ---------------------------------------------------------------------------
+
+DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+DOCUMENT_TYPES = {"pdf", "jpg", "jpeg", "png", "doc", "docx", "xls", "xlsx", "txt"}
+
+
+class StaffDocumentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        from .models import StaffDocument
+
+        model = StaffDocument
+        fields = (
+            "id", "title", "category", "original_name", "size",
+            "uploaded_by_name", "created_at",
+        )
+
+    def get_uploaded_by_name(self, obj):
+        user = obj.uploaded_by
+
+        return (user.get_full_name() or user.username) if user else ""
+
+
+class StaffDocumentUploadSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    category = serializers.ChoiceField(
+        choices=[
+            ("identity", "Identity"), ("contract", "Contract"),
+            ("cv", "CV / Certificate"), ("other", "Other"),
+        ],
+        required=False,
+        default="other",
+    )
+    file = serializers.FileField()
+
+    def validate_file(self, upload):
+        extension = upload.name.rsplit(".", 1)[-1].lower() if "." in upload.name else ""
+
+        if extension not in DOCUMENT_TYPES:
+            raise serializers.ValidationError(
+                "Upload a PDF, image, Word, Excel or text file."
+            )
+
+        if upload.size > DOCUMENT_MAX_BYTES:
+            raise serializers.ValidationError("The file must be 10 MB or smaller.")
+
+        if upload.size == 0:
+            raise serializers.ValidationError("The file is empty.")
+
+        return upload

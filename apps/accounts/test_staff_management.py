@@ -790,3 +790,78 @@ class NoSignInStaffTests(StaffManagementTestCase):
 
         self.assertEqual(back.status_code, 200, back.data)
         self.assertTrue(back.data["is_active"])
+
+
+class StaffDocumentTests(StaffManagementTestCase):
+    """Files kept on a person's record."""
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        from django.test import override_settings
+
+        self._media = tempfile.TemporaryDirectory()
+        self._override = override_settings(MEDIA_ROOT=self._media.name)
+        self._override.enable()
+        self.addCleanup(self._override.disable)
+        self.addCleanup(self._media.cleanup)
+        self.person = self.create_staff().data["id"]
+        self.url = f"{STAFF_URL}{self.person}/documents/"
+
+    def upload(self, name="id-card.pdf", content=b"%PDF-1.4 test", **extra):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return self.client.post(
+            self.url,
+            {"file": SimpleUploadedFile(name, content), **extra},
+            format="multipart",
+        )
+
+    def test_upload_list_download_and_delete(self):
+        response = self.upload(title="Citizenship", category="identity")
+
+        self.assertEqual(response.status_code, 201, response.data)
+        doc = response.data["id"]
+        self.assertEqual(response.data["title"], "Citizenship")
+
+        listed = self.client.get(self.url).data
+        self.assertEqual([d["id"] for d in listed], [doc])
+
+        download = self.client.get(f"{self.url}{doc}/")
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b"".join(download.streaming_content), b"%PDF-1.4 test")
+
+        self.assertEqual(self.client.delete(f"{self.url}{doc}/").status_code, 204)
+        self.assertEqual(self.client.get(self.url).data, [])
+
+    def test_title_defaults_to_the_file_name(self):
+        self.assertEqual(self.upload().data["title"], "id-card")
+
+    def test_only_safe_file_types_under_ten_megabytes(self):
+        self.assertEqual(self.upload(name="run.exe").status_code, 400)
+        self.assertEqual(
+            self.upload(content=b"x" * (10 * 1024 * 1024 + 1)).status_code, 400
+        )
+
+    def test_files_need_a_sign_in(self):
+        doc = self.upload().data["id"]
+        self.client.logout()
+        self.client.credentials()
+
+        self.assertEqual(self.client.get(f"{self.url}{doc}/").status_code, 401)
+
+    def test_a_clerk_without_staff_permission_is_refused(self):
+        self.make_user("clerk", User.Role.STAFF, business=self.ho, position=self.position)
+        self.authenticate("ACME-HO", "clerk")
+
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_someone_who_never_signs_in_can_hold_documents(self):
+        worker = self.client.post(
+            STAFF_URL,
+            {"first_name": "Hari", "role": "staff", "can_sign_in": False},
+            format="json",
+        ).data["id"]
+        self.url = f"{STAFF_URL}{worker}/documents/"
+
+        self.assertEqual(self.upload().status_code, 201)

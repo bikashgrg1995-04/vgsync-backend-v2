@@ -53,6 +53,7 @@ TRACKED = {
     "accounts.User": True,
     "accounts.Position": True,
     "businesses.Business": True,
+    "accounts.StaffDocument": True,
     "accounts.PositionPermission": True,
     "accounts.StaffPermissionOverride": True,
     "approvals.ApprovalRule": True,
