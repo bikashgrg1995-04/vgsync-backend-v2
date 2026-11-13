@@ -657,6 +657,25 @@ class DailySheetTests(PayrollTestCase):
         )
         self.assertEqual(money(row["month"]["earned"]), money("1200"))
 
+    def test_one_persons_month_of_attendance(self):
+        self.mark("present", day="2026-01-08")
+        self.mark("half", day="2026-01-09")
+        self.mark("absent")
+        self.mark("present", day="2026-02-01")
+
+        data = self.client.get(
+            f"{WORKDAYS_URL}staff/{self.sita.pk}/", {"month": "2026-01"}
+        ).json()
+
+        self.assertEqual((data["present"], data["half"], data["absent"]), (1, 1, 1))
+        self.assertEqual([d["date"] for d in data["days"]],
+                         ["2026-01-08", "2026-01-09", "2026-01-10"])
+        self.assertEqual(float(data["earned"]), 1200.0)
+
+        self.client.force_authenticate(self.ram)
+        self.assertEqual(
+            self.client.get(f"{WORKDAYS_URL}staff/{self.sita.pk}/").status_code, 403)
+
     def test_only_the_owner_runs_the_sheet(self):
         self.client.force_authenticate(self.ram)
 

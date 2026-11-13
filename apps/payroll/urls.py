@@ -11,7 +11,7 @@ from .views import (
     PayrollPaymentViewSet,
     SalaryDetailView,
     SalaryListView,
-    WorkSheetView,
+    WorkSheetView, StaffAttendanceView,
 )
 
 app_name = "payroll"
@@ -31,6 +31,7 @@ urlpatterns = [
         name="statement",
     ),
     path("workdays/", WorkSheetView.as_view(), name="workdays"),
+    path("workdays/staff/<int:staff_id>/", StaffAttendanceView.as_view(), name="staff-attendance"),
     path("me/", MyPayView.as_view(), name="my-pay"),
     path("me/statement/", MyStatementView.as_view(), name="my-statement"),
 ] + router.urls

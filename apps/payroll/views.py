@@ -586,3 +586,47 @@ class WorkSheetView(APIView):
             )
 
         return Response(_sheet(request.active_business, day))
+
+
+class StaffAttendanceView(APIView):
+    """``GET workdays/staff/<id>/?month=YYYY-MM`` — one person's marks for a month."""
+
+    permission_classes = [IsOwner]
+
+    def get(self, request, staff_id):
+        from calendar import monthrange
+        from datetime import date as _date
+        from rest_framework.exceptions import ValidationError
+
+        person = get_object_or_404(scoped_users(request.active_business), pk=staff_id)
+        raw = request.query_params.get("month")
+
+        try:
+            year, month = (int(p) for p in raw.split("-")) if raw else (
+                timezone.localdate().year, timezone.localdate().month)
+            first = _date(year, month, 1)
+        except (ValueError, TypeError):
+            raise ValidationError({"month": "Use the form YYYY-MM."})
+
+        last = _date(year, month, monthrange(year, month)[1])
+        marks = list(
+            WorkDay.objects.filter(staff=person, work_date__range=(first, last))
+            .select_related("entry").order_by("work_date")
+        )
+        count = lambda st: sum(1 for m in marks if m.status == st)
+
+        return Response({
+            "month": first.strftime("%Y-%m"),
+            "present": count("present"),
+            "half": count("half"),
+            "absent": count("absent"),
+            "earned": sum((m.entry.amount for m in marks
+                           if m.entry and m.entry.status == "active"), 0),
+            "days": [{
+                "date": m.work_date.isoformat(),
+                "status": m.status,
+                "extra": m.extra_amount,
+                "note": m.note,
+                "amount": m.entry.amount if m.entry else 0,
+            } for m in marks],
+        })
