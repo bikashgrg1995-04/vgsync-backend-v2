@@ -189,11 +189,16 @@ def build_backup(user, business):
 # Restore
 # ---------------------------------------------------------------------------
 
-# Never restored: sign-in accounts and permissions (passwords are not in a
-# backup), the change history, approvals, notifications, the businesses
-# themselves and stock transfers between businesses (they involve other
-# businesses' data).
-RESTORE_SKIP_APPS = {"accounts", "audit", "approvals", "notifications", "businesses", "support"}
+# Never restored, on purpose:
+# - sign-in accounts, positions and permissions: passwords are not in a
+#   backup, and putting an old list of staff or access back could reactivate
+#   someone who has since left or hand back permissions that were taken away;
+# - the change history (audit): history is never rewound;
+# - notifications: they are rebuilt from the restored records (see
+#   ``apply_restore``) instead of bringing back stale ones;
+# - the businesses themselves and stock transfers between businesses (they
+#   involve other businesses' data), and support tickets.
+RESTORE_SKIP_APPS = {"accounts", "audit", "notifications", "businesses", "support"}
 RESTORE_SKIP_WORDS = ("transfer",)
 
 
@@ -347,6 +352,13 @@ def apply_restore(user, business, data):
 
             # Find every row to remove first: deleting a parent table would
             # otherwise hide its children from the lookups.
+            # Notifications point at follow-ups, purchases and tasks that
+            # may not exist in the backup, so clear them first; they are
+            # rebuilt from the restored records afterwards.
+            from apps.notifications.models import Notification
+
+            Notification.objects.filter(business_id__in=scope_ids).delete()
+
             doomed = []
 
             for model, path, _ in plan:

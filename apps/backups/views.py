@@ -9,7 +9,13 @@ from apps.common.permissions import HasModulePermission
 
 from .models import BackupLog
 from .serializers import BackupLogSerializer
-from .services import RestoreError, apply_restore, build_backup, preview_restore
+from .services import (
+    RestoreError,
+    apply_restore,
+    build_backup,
+    businesses_in_scope,
+    preview_restore,
+)
 
 MAX_UPLOAD = 50 * 1024 * 1024
 KEEP_SAFETY_COPIES = 3
@@ -122,6 +128,14 @@ class BackupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             apply_restore_result = apply_restore(request.user, business, data)
         except RestoreError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Notifications were cleared with the restore: make them again from
+        # the restored follow-ups, payments and tasks.
+        from apps.notifications.services import generate_for_business, generate_payables
+
+        for scoped in businesses_in_scope(request.user, business):
+            generate_for_business(scoped)
+            generate_payables(scoped)
 
         # Only after the restore went through: keep the copy that undoes it.
         BackupLog.objects.create(

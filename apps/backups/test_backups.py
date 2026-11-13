@@ -139,6 +139,35 @@ class RestoreTests(ReturnTestCase):
         self.assertEqual(self.upload(data).status_code, 200)
         self.assertTrue(User.objects.filter(username="later").exists())
 
+    def test_a_restore_works_when_later_tasks_already_have_notifications(self):
+        from apps.notifications.models import Notification
+        from apps.tasks.models import Task
+
+        data = self.take()
+        task = Task.objects.create(business=self.ho, title="Later", assigned_by=self.owner, assigned_to=self.owner)
+        Notification.objects.create(
+            business=self.ho, task=task, kind="task_assigned",
+            title="Later", dedupe_key="t-later",
+        )
+
+        response = self.upload(data)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(Task.objects.filter(pk=task.pk).exists())
+        self.assertFalse(Notification.objects.filter(business=self.ho).exists())
+
+    def test_approvals_come_back_with_the_restore(self):
+        from apps.approvals.models import ApprovalRule
+
+        ApprovalRule.objects.create(
+            business=self.ho, kind="purchase", threshold="1000"
+        )
+        data = self.take()
+        ApprovalRule.objects.filter(business=self.ho).delete()
+
+        self.assertEqual(self.upload(data).status_code, 200)
+        self.assertEqual(ApprovalRule.objects.filter(business=self.ho).count(), 1)
+
     def test_a_backup_from_another_business_is_refused(self):
         self.make_user("branchowner", User.Role.OWNER, business=self.branch)
         self.authenticate("ACME-BR", "branchowner")
