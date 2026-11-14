@@ -251,6 +251,14 @@ class SaleWriteSerializer(serializers.Serializer):
             "(0 for none) and the monthly amount is worked out for you."
         ),
     )
+    # Financed by a company: who, their reference and when they should pay.
+    financer_name = serializers.CharField(
+        max_length=120, required=False, allow_blank=True
+    )
+    financer_ref = serializers.CharField(
+        max_length=60, required=False, allow_blank=True
+    )
+    financer_due_date = serializers.DateField(required=False, allow_null=True)
     # Credit sales: when the customer promised to pay the rest.
     due_date = serializers.DateField(required=False, allow_null=True)
     # Maintenance: the customer's bike.
@@ -395,6 +403,7 @@ class SalePaymentSerializer(serializers.ModelSerializer):
             "amount",
             "paid_on",
             "method",
+            "payer",
             "reference",
             "notes",
             "status",
@@ -443,6 +452,8 @@ class SaleSerializer(serializers.ModelSerializer):
     )
     documents_total = serializers.SerializerMethodField()
     documents_verified = serializers.SerializerMethodField()
+    financer_receivable = serializers.SerializerMethodField()
+    financer_received = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -465,6 +476,11 @@ class SaleSerializer(serializers.ModelSerializer):
             "vat_amount",
             "net_total",
             "payment_mode",
+            "financer_name",
+            "financer_ref",
+            "financer_due_date",
+            "financer_receivable",
+            "financer_received",
             "down_payment",
             "emi_months",
             "emi_amount",
@@ -541,6 +557,23 @@ class SaleSerializer(serializers.ModelSerializer):
 
     def get_payment_status(self, obj):
         return payment_status(obj.amount_due, self._settled(obj))
+
+    def get_financer_receivable(self, obj):
+        """What the company is to pay the dealer (the total less the down payment)."""
+        if obj.payment_mode != Sale.PaymentMode.FINANCED:
+            return "0.00"
+
+        return str(obj.amount_due - obj.down_payment)
+
+    def get_financer_received(self, obj):
+        return str(sum(
+            (
+                p.amount for p in obj.payments.all()
+                if p.status == SalePayment.Status.ACTIVE
+                and p.payer == SalePayment.Payer.FINANCER
+            ),
+            Decimal("0.00"),
+        ))
 
     def get_documents_total(self, obj):
         return len(obj.documents.all())
@@ -805,6 +838,7 @@ class FollowupSerializer(serializers.ModelSerializer):
             "vehicle_chassis_no",
             "vehicle_reg_no",
             "installment_number",
+            "service_number",
             "due_date",
             "amount",
             "status",

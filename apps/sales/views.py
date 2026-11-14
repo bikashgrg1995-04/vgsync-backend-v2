@@ -451,7 +451,8 @@ class SaleViewSet(SalesBaseViewSet):
 
         if (
             data.get("sale_type") == Sale.SaleType.BIKE
-            or data.get("payment_mode") == Sale.PaymentMode.EMI
+            or data.get("payment_mode")
+            in (Sale.PaymentMode.EMI, Sale.PaymentMode.FINANCED)
         ):
             self.need_bike("create")
 
@@ -651,8 +652,8 @@ class SaleViewSet(SalesBaseViewSet):
             ignore_documents=bool(request.data.get("ignore_documents")),
         )
 
-        if sale.payment_mode == Sale.PaymentMode.EMI:
-            # An instalment due within days is flagged at once.
+        if sale.payment_mode in (Sale.PaymentMode.EMI, Sale.PaymentMode.FINANCED):
+            # An instalment (or the company's payment) due within days is flagged at once.
             from apps.notifications.services import generate_for_business
 
             generate_for_business(request.active_business)
@@ -729,6 +730,7 @@ class SalePaymentViewSet(SalesBaseViewSet):
             method=data["method"],
             reference=data.get("reference", ""),
             notes=data.get("notes", ""),
+            payer=data.get("payer", SalePayment.Payer.CUSTOMER),
         )
 
         return Response(
@@ -795,6 +797,14 @@ class BikeUnitViewSet(SalesBaseViewSet):
 # Follow-ups
 # ---------------------------------------------------------------------------
 
+# Follow-ups of a bike sale: shown only to those who may see bike sales.
+BIKE_FOLLOWUP_KINDS = (
+    Followup.Kind.EMI_DUE,
+    Followup.Kind.FINANCER_DUE,
+    Followup.Kind.FREE_SERVICE_DUE,
+)
+
+
 class FollowupViewSet(SalesBaseViewSet):
     """
     Calls and visits to make: maintenance 3 and 90 days after a service
@@ -831,7 +841,7 @@ class FollowupViewSet(SalesBaseViewSet):
         ).select_related("sale", "customer", "installment")
 
         if not self.can_bike("view"):
-            queryset = queryset.exclude(kind=Followup.Kind.EMI_DUE)
+            queryset = queryset.exclude(kind__in=BIKE_FOLLOWUP_KINDS)
 
         if self.request.query_params.get("overdue") in ("true", "1"):
             queryset = queryset.filter(
@@ -852,7 +862,7 @@ class FollowupViewSet(SalesBaseViewSet):
         serializer.is_valid(raise_exception=True)
         target = self.get_object()
 
-        if target.kind == Followup.Kind.EMI_DUE:
+        if target.kind in BIKE_FOLLOWUP_KINDS:
             self.need_bike("update")
 
         followup = complete_followup(
@@ -872,7 +882,7 @@ class FollowupViewSet(SalesBaseViewSet):
         serializer.is_valid(raise_exception=True)
         target = self.get_object()
 
-        if target.kind == Followup.Kind.EMI_DUE:
+        if target.kind in BIKE_FOLLOWUP_KINDS:
             self.need_bike("update")
 
         followup = skip_followup(

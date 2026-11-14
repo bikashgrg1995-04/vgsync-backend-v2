@@ -62,6 +62,12 @@ MAINTENANCE_KINDS = (
     Followup.Kind.MAINTENANCE_POST,
     Followup.Kind.MAINTENANCE_DUE,
 )
+# The first free service falls due a month after the sale, then every 3 months.
+FREE_SERVICE_FIRST_DAYS = 30
+FREE_SERVICE_EVERY_DAYS = 90
+FINANCER_PAY_DAYS = 15
+# Follow-ups that do not wait for money.
+NOT_MONEY_KINDS = MAINTENANCE_KINDS + (Followup.Kind.FREE_SERVICE_DUE,)
 CREDIT_FOLLOWUP_DAYS = 30
 
 
@@ -230,6 +236,7 @@ def _check_terms(sale, net_total):
     being saved.
     """
     emi = sale.payment_mode == Sale.PaymentMode.EMI
+    financed = sale.payment_mode == Sale.PaymentMode.FINANCED
 
     if sale.sale_type != Sale.SaleType.MAINTENANCE and (
         sale.vehicle_chassis_no or sale.vehicle_reg_no
@@ -237,6 +244,57 @@ def _check_terms(sale, net_total):
         raise serializers.ValidationError(
             {"vehicle_chassis_no": "The customer's bike is for maintenance sales."}
         )
+
+    if not financed and (
+        sale.financer_name or sale.financer_ref or sale.financer_due_date
+    ):
+        raise serializers.ValidationError({
+            "financer_name": "Finance company details need payment_mode financed."
+        })
+
+    if financed:
+        if sale.sale_type != Sale.SaleType.BIKE:
+            raise serializers.ValidationError(
+                {"payment_mode": "Finance by a company is for bike sales."}
+            )
+
+        if sale.customer_id is None:
+            raise serializers.ValidationError(
+                {"customer": "A financed sale needs a customer."}
+            )
+
+        if not sale.financer_name.strip():
+            raise serializers.ValidationError(
+                {"financer_name": "Give the name of the finance company."}
+            )
+
+        if (
+            sale.emi_months or sale.emi_amount or sale.first_emi_due
+            or sale.interest_rate is not None
+        ):
+            raise serializers.ValidationError({
+                "payment_mode": (
+                    "The company runs the instalments; EMI details are for "
+                    "own EMI."
+                )
+            })
+
+        sale.down_payment = money(sale.down_payment or 0)
+
+        if sale.down_payment >= net_total:
+            raise serializers.ValidationError({
+                "down_payment": (
+                    "The down payment must be less than the total; the "
+                    "company pays the rest."
+                )
+            })
+
+        if sale.financer_due_date and sale.financer_due_date < sale.sale_date:
+            raise serializers.ValidationError({
+                "financer_due_date": "This cannot be before the sale date."
+            })
+
+        return ZERO
 
     if not emi:
         if (
@@ -638,6 +696,7 @@ def confirm_sale(*, sale, user, ignore_documents=False):
 
             sale.documents_ignored = True
     emi = sale.payment_mode == Sale.PaymentMode.EMI
+    financed = sale.payment_mode == Sale.PaymentMode.FINANCED
 
     # Without a customer there is nobody to collect the rest from.
     if sale.customer_id is None and paid < sale.amount_due:
@@ -647,7 +706,7 @@ def confirm_sale(*, sale, user, ignore_documents=False):
             code="customer_required",
         )
 
-    if emi and paid < sale.down_payment:
+    if (emi or financed) and paid < sale.down_payment:
         raise Conflict(
             f"Take the down payment ({sale.down_payment}) before confirming. "
             f"{paid} has been received.",
@@ -704,6 +763,7 @@ def confirm_sale(*, sale, user, ignore_documents=False):
         _log_free_job(sale, user)
 
     _create_followups(sale)
+    sync_free_service_followups(sale)
     sync_followups(sale)
 
     return sale
@@ -751,6 +811,20 @@ def _create_followups(sale):
                 amount=installment.amount,
             )
 
+    elif sale.payment_mode == Sale.PaymentMode.FINANCED:
+        # What the company still owes the dealer, not the customer.
+        if sale.amount_due > settled_total(sale):
+            Followup.objects.create(
+                business=sale.business,
+                sale=sale,
+                customer=sale.customer,
+                kind=Followup.Kind.FINANCER_DUE,
+                due_date=sale.financer_due_date
+                or sale.sale_date + timedelta(days=FINANCER_PAY_DAYS),
+                amount=sale.amount_due - settled_total(sale),
+                note=f"{sale.financer_name} {sale.financer_ref}".strip(),
+            )
+
     elif sale.amount_due > settled_total(sale):
         Followup.objects.create(
             business=sale.business,
@@ -775,6 +849,63 @@ def _create_followups(sale):
                 kind=kind,
                 due_date=sale.sale_date + timedelta(days=days),
             )
+
+
+def sync_free_service_followups(sale):
+    """
+    Keep one "free service due" follow-up for each free service of a
+    confirmed bike sale: add the missing ones (the count can grow), drop the
+    pending ones past the count, close those whose service was logged and
+    open again those whose record was removed.
+    """
+    if sale.sale_type != Sale.SaleType.BIKE or sale.status != Sale.Status.CONFIRMED:
+        return
+
+    rows = {
+        f.service_number: f
+        for f in sale.followups.filter(kind=Followup.Kind.FREE_SERVICE_DUE)
+    }
+    done = {r.number: r for r in sale.free_service_records.all()}
+    today = timezone.localdate()
+
+    for number in range(1, sale.free_services + 1):
+        row = rows.get(number)
+
+        if row is None:
+            row = Followup.objects.create(
+                business=sale.business,
+                sale=sale,
+                customer=sale.customer,
+                kind=Followup.Kind.FREE_SERVICE_DUE,
+                service_number=number,
+                due_date=sale.sale_date + timedelta(
+                    days=FREE_SERVICE_FIRST_DAYS
+                    + FREE_SERVICE_EVERY_DAYS * (number - 1)
+                ),
+                note=f"Free service {number} of {sale.free_services}",
+            )
+
+        record = done.get(number)
+
+        if record and row.status == Followup.Status.PENDING:
+            row.status = Followup.Status.DONE
+            row.auto_closed = True
+            row.completed_on = record.service_date
+            row.save()
+
+        elif (
+            record is None
+            and row.auto_closed
+            and row.status == Followup.Status.DONE
+        ):
+            row.status = Followup.Status.PENDING
+            row.auto_closed = False
+            row.completed_on = None
+            row.save()
+
+    for number, row in rows.items():
+        if number > sale.free_services and row.status == Followup.Status.PENDING:
+            row.delete()
 
 
 def installment_rows(sale):
@@ -821,7 +952,7 @@ def sync_followups(sale):
     remaining = sale.amount_due - settled_total(sale)
     today = timezone.localdate()
 
-    for followup in sale.followups.exclude(kind__in=MAINTENANCE_KINDS):
+    for followup in sale.followups.exclude(kind__in=NOT_MONEY_KINDS):
         if followup.kind == Followup.Kind.EMI_DUE:
             settled = covered.get(followup.installment_id, False)
         else:
@@ -914,7 +1045,7 @@ def skip_followup(*, followup, user, note):
 
 @transaction.atomic
 def create_payment(*, sale, user, amount, paid_on, method,
-                   reference="", notes=""):
+                   reference="", notes="", payer="customer"):
     from apps.finance.services import record_sale_income
 
     sale = Sale.objects.select_for_update().get(pk=sale.pk)
@@ -924,6 +1055,17 @@ def create_payment(*, sale, user, amount, paid_on, method,
 
     settled = settled_total(sale)
     amount = money(amount)
+
+    if payer == SalePayment.Payer.FINANCER:
+        if sale.payment_mode != Sale.PaymentMode.FINANCED:
+            raise serializers.ValidationError(
+                {"payer": "Only a financed sale takes a payment from the company."}
+            )
+
+        if sale.status != Sale.Status.CONFIRMED:
+            raise serializers.ValidationError(
+                {"payer": "The company pays after the sale is confirmed."}
+            )
 
     # An accident repair has no final total yet, so its advance is not held
     # to the provisional amount; the final bill is checked at confirm.
@@ -944,6 +1086,7 @@ def create_payment(*, sale, user, amount, paid_on, method,
         amount=amount,
         paid_on=paid_on,
         method=method,
+        payer=payer,
         reference=reference,
         notes=notes,
         received_by=user,
@@ -990,6 +1133,24 @@ def void_payment(*, payment, user, reason):
             "sale.",
             code="down_payment_due",
         )
+
+    if (
+        sale.status == Sale.Status.CONFIRMED
+        and sale.payment_mode == Sale.PaymentMode.FINANCED
+        and payment.payer == SalePayment.Payer.CUSTOMER
+    ):
+        customer_left = (
+            sale.payments.filter(
+                status=SalePayment.Status.ACTIVE, payer=SalePayment.Payer.CUSTOMER
+            ).exclude(pk=payment.pk).aggregate(t=Sum("amount"))["t"]
+            or ZERO
+        )
+
+        if customer_left < sale.down_payment:
+            raise Conflict(
+                "This payment is part of the down payment of a financed sale.",
+                code="down_payment_due",
+            )
 
     payment.status = SalePayment.Status.VOID
     payment.voided_by = user
@@ -1101,7 +1262,7 @@ def add_free_service(
                 )
             })
 
-    return FreeService.objects.create(
+    record = FreeService.objects.create(
         business=sale.business,
         sale=sale,
         number=(records[-1].number + 1) if records else 1,
@@ -1112,6 +1273,9 @@ def add_free_service(
         technician=technician,
         recorded_by=user,
     )
+    sync_free_service_followups(sale)
+
+    return record
 
 
 @transaction.atomic
@@ -1126,6 +1290,7 @@ def remove_free_service(*, sale, record_id):
         )
 
     last.delete()
+    sync_free_service_followups(sale)
 
 
 @transaction.atomic
@@ -1146,5 +1311,6 @@ def set_free_service_count(*, sale, count, covers=None):
         fields.append("free_service_covers")
 
     sale.save(update_fields=fields)
+    sync_free_service_followups(sale)
 
     return sale

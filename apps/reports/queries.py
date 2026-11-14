@@ -243,6 +243,7 @@ def receivables(business, today):
 
     rows = []
     emi_open = ZERO
+    financer_open = ZERO
 
     for sale in sales:
         open_amount = (
@@ -259,6 +260,11 @@ def receivables(business, today):
             emi_open += open_amount
             continue
 
+        if sale.payment_mode == Sale.PaymentMode.FINANCED:
+            # Owed by the finance company, not by the customer's name.
+            financer_open += open_amount
+            continue
+
         # A walk-in sale is paid in full, so it always has a customer here.
         rows.append((
             sale.customer_id,
@@ -269,6 +275,7 @@ def receivables(business, today):
 
     report = _ageing(rows, today)
     report["emi_outstanding"] = money(emi_open)
+    report["financer_outstanding"] = money(financer_open)
 
     return report
 

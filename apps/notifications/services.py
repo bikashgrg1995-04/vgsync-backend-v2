@@ -135,7 +135,13 @@ def generate_for_business(business, today=None):
                 # An instalment opens its sale, where the schedule is.
                 "link": (
                     f"/dashboard/sales/detail?id={followup.sale_id}"
-                    if followup.kind == Followup.Kind.EMI_DUE and followup.sale_id
+                    if followup.kind
+                    in (
+                        Followup.Kind.EMI_DUE,
+                        Followup.Kind.FINANCER_DUE,
+                        Followup.Kind.FREE_SERVICE_DUE,
+                    )
+                    and followup.sale_id
                     else ""
                 ),
             },

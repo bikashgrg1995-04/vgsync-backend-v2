@@ -57,6 +57,9 @@ def _ageing(data, business, title, party, filename):
         (label, data["buckets"][key]) for key, label in AGEING
     ]
 
+    if "financer_outstanding" in data:
+        summary.append(("Due from finance companies (not aged)", data["financer_outstanding"]))
+
     if "emi_outstanding" in data:
         summary.append(("EMI balance (not aged)", data["emi_outstanding"]))
 

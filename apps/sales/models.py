@@ -185,6 +185,9 @@ class Sale(models.Model):
     class PaymentMode(models.TextChoices):
         FULL = "full", "Full payment"
         EMI = "emi", "EMI"
+        # A finance or insurance company pays the dealer and runs the
+        # customer's instalments itself. No EMI schedule is kept here.
+        FINANCED = "financed", "Financed by company"
 
     sale_type = models.CharField(
         max_length=12, choices=SaleType.choices, default=SaleType.STOCK
@@ -200,8 +203,14 @@ class Sale(models.Model):
     # ``emi_months`` monthly instalments of ``emi_amount``. Whatever that
     # adds up to above the net total is the ``finance_charge``.
     payment_mode = models.CharField(
-        max_length=5, choices=PaymentMode.choices, default=PaymentMode.FULL
+        max_length=10, choices=PaymentMode.choices, default=PaymentMode.FULL
     )
+    # Financed: the company, its loan or policy number, and when it is
+    # expected to pay the dealer. The customer pays ``down_payment`` and the
+    # company the rest (``SalePayment.payer == "financer"``).
+    financer_name = models.CharField(max_length=120, blank=True)
+    financer_ref = models.CharField(max_length=60, blank=True)
+    financer_due_date = models.DateField(null=True, blank=True)
     down_payment = models.DecimalField(**MONEY, default=ZERO)
     emi_months = models.PositiveSmallIntegerField(null=True, blank=True)
     emi_amount = models.DecimalField(**MONEY, null=True, blank=True)
@@ -329,6 +338,16 @@ class Sale(models.Model):
                     Q(
                         payment_mode="full",
                         down_payment=0,
+                        finance_charge=0,
+                        emi_months__isnull=True,
+                        emi_amount__isnull=True,
+                        interest_rate__isnull=True,
+                        first_emi_due__isnull=True,
+                    )
+                    | Q(
+                        payment_mode="financed",
+                        sale_type="bike",
+                        down_payment__gte=0,
                         finance_charge=0,
                         emi_months__isnull=True,
                         emi_amount__isnull=True,
@@ -464,6 +483,14 @@ class SalePayment(models.Model):
     amount = models.DecimalField(**MONEY)
     paid_on = models.DateField()
     method = models.CharField(max_length=10, choices=Method.choices)
+
+    class Payer(models.TextChoices):
+        CUSTOMER = "customer", "Customer"
+        FINANCER = "financer", "Finance company"
+
+    payer = models.CharField(
+        max_length=10, choices=Payer.choices, default=Payer.CUSTOMER
+    )
     reference = models.CharField(max_length=100, blank=True)
     notes = models.CharField(max_length=200, blank=True)
 
@@ -560,6 +587,10 @@ class Followup(models.Model):
         MAINTENANCE_DUE = "maintenance_due", "Maintenance follow-up (90 days)"
         EMI_DUE = "emi_due", "EMI instalment"
         CREDIT_DUE = "credit_due", "Credit to receive"
+        # The company that financed a bike has not paid yet.
+        FINANCER_DUE = "financer_due", "Payment due from finance company"
+        # One per free service included with a bike (``service_number``).
+        FREE_SERVICE_DUE = "free_service_due", "Free service due"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -610,6 +641,8 @@ class Followup(models.Model):
     note = models.CharField(max_length=300, blank=True)
     # Maintenance only: did the customer report a problem after the service?
     has_issue = models.BooleanField(default=False)
+    # Free service due: which one (1 = the first).
+    service_number = models.PositiveSmallIntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
