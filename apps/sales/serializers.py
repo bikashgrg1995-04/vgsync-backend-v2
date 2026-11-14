@@ -261,6 +261,10 @@ class SaleWriteSerializer(serializers.Serializer):
         max_length=30, required=False, allow_blank=True
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+    free_service_covers = serializers.CharField(
+        max_length=500, required=False, allow_blank=True,
+        help_text="Bike sales: what a free service covers.",
+    )
     free_services = serializers.IntegerField(
         min_value=0, max_value=20, required=False,
         help_text="Bike sales: how many free services come with the bike.",
@@ -434,6 +438,9 @@ class SaleSerializer(serializers.ModelSerializer):
     free_service_for_no = serializers.CharField(
         source="free_service_for.sale_no", default=None, read_only=True
     )
+    free_service_for_covers = serializers.CharField(
+        source="free_service_for.free_service_covers", default="", read_only=True
+    )
     documents_total = serializers.SerializerMethodField()
     documents_verified = serializers.SerializerMethodField()
 
@@ -465,11 +472,13 @@ class SaleSerializer(serializers.ModelSerializer):
             "interest_rate",
             "finance_charge",
             "free_services",
+            "free_service_covers",
             "free_services_used",
             "free_services_left",
             "service_kind",
             "free_service_for",
             "free_service_for_no",
+            "free_service_for_covers",
             "odometer_km",
             "documents_ignored",
             "documents_total",
@@ -657,6 +666,9 @@ class FreeServiceWriteSerializer(serializers.Serializer):
 
 class FreeServiceCountSerializer(serializers.Serializer):
     free_services = serializers.IntegerField(min_value=0, max_value=20)
+    free_service_covers = serializers.CharField(
+        max_length=500, required=False, allow_blank=True
+    )
 
 
 class SaleDetailSerializer(SaleSerializer):

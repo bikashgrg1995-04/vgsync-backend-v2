@@ -630,7 +630,9 @@ class SaleViewSet(SalesBaseViewSet):
         serializer = FreeServiceCountSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         sale = set_free_service_count(
-            sale=sale, count=serializer.validated_data["free_services"]
+            sale=sale,
+            count=serializer.validated_data["free_services"],
+            covers=serializer.validated_data.get("free_service_covers"),
         )
 
         return self._respond(sale)

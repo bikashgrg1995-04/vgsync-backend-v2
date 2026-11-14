@@ -227,3 +227,51 @@ class ServiceKindTests(BikeTestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+class FreeServiceCoversTests(BikeTestCase):
+    """What a free service covers, and extra work being charged."""
+
+    job = ServiceKindTests.job
+    bill = ServiceKindTests.bill
+
+    def test_the_bike_sale_says_what_is_covered_and_the_job_shows_it(self):
+        bike = self.made_bike(free_services=2, free_service_covers="Labour, oil change")
+        self.client.post(
+            "/api/v1/sales/payments/",
+            {"sale": bike["id"], "amount": "100000", "method": "cash"}, format="json",
+        )
+        self.bill(bike["id"])
+        job = self.job(
+            service_kind="free", free_service_for=bike["id"], odometer_km=500
+        ).json()
+
+        self.assertEqual(job["free_service_for_covers"], "Labour, oil change")
+
+    def test_extra_parts_on_a_free_service_are_charged(self):
+        bike = self.made_bike(free_services=2)
+        self.client.post(
+            "/api/v1/sales/payments/",
+            {"sale": bike["id"], "amount": "100000", "method": "cash"}, format="json",
+        )
+        self.bill(bike["id"])
+        job = self.job(
+            service_kind="free", free_service_for=bike["id"], odometer_km=500,
+            items=[
+                {"description": "Free service labour", "quantity": "1", "unit_price": "0"},
+                {"description": "Brake pad (extra)", "quantity": "1", "unit_price": "850"},
+            ],
+        ).json()
+
+        self.assertEqual(job["amount_due"], "850.00")
+        self.assertEqual(self.bill(job["id"]).status_code, 200)
+
+    def test_only_bike_sales_have_a_covers_note(self):
+        response = self.client.post(
+            BASE,
+            {"sale_type": "stock", "free_service_covers": "Oil",
+             "items": [{"product": self.model.pk, "quantity": "1", "unit_price": "100"}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)

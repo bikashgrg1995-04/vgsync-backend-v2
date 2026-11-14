@@ -436,7 +436,9 @@ def _check_service_kind(sale):
 
 
 def _check_free_services(sale):
-    if sale.free_services and sale.sale_type != Sale.SaleType.BIKE:
+    if (
+        sale.free_services or sale.free_service_covers
+    ) and sale.sale_type != Sale.SaleType.BIKE:
         raise serializers.ValidationError(
             {"free_services": "Free services are only for bike sales."}
         )
@@ -1127,7 +1129,7 @@ def remove_free_service(*, sale, record_id):
 
 
 @transaction.atomic
-def set_free_service_count(*, sale, count):
+def set_free_service_count(*, sale, count, covers=None):
     sale = _free_service_sale(sale)
     used = sale.free_service_records.count()
 
@@ -1137,6 +1139,12 @@ def set_free_service_count(*, sale, count):
         })
 
     sale.free_services = count
-    sale.save(update_fields=["free_services", "updated_at"])
+    fields = ["free_services", "updated_at"]
+
+    if covers is not None:
+        sale.free_service_covers = covers
+        fields.append("free_service_covers")
+
+    sale.save(update_fields=fields)
 
     return sale

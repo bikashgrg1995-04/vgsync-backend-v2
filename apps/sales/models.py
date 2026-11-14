@@ -216,6 +216,9 @@ class Sale(models.Model):
     # Bike sales: how many free services the sale includes. Each one that is
     # done is a ``FreeService``; what is left is this minus those.
     free_services = models.PositiveSmallIntegerField(default=0)
+    # What a free service covers (labour, oil, wash...). Anything beyond it,
+    # extra parts or extra work, is a priced line on the free-service job.
+    free_service_covers = models.CharField(max_length=500, blank=True)
 
     # Maintenance sales only. ``paid``: an ordinary service. ``free``: one of
     # the free services of a bike sold earlier (``free_service_for``), logged
