@@ -44,6 +44,7 @@ TRACKED = {
     "sales.BikeUnit": True,
     "sales.Sale": True,
     "sales.SalePayment": True,
+    "sales.FreeService": True,
     "sales.SaleReturn": True,
     "sales.SaleCreditSettlement": True,
     "finance.Expense": True,

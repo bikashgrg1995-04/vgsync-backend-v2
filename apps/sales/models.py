@@ -213,6 +213,9 @@ class Sale(models.Model):
         max_digits=5, decimal_places=2, null=True, blank=True
     )
     finance_charge = models.DecimalField(**MONEY, default=ZERO)
+    # Bike sales: how many free services the sale includes. Each one that is
+    # done is a ``FreeService``; what is left is this minus those.
+    free_services = models.PositiveSmallIntegerField(default=0)
 
     # When the customer promised to pay what is left (a credit sale).
     due_date = models.DateField(null=True, blank=True)
@@ -892,3 +895,45 @@ class SaleCreditSettlementItem(models.Model):
 
     def __str__(self):
         return f"{self.product} x {self.quantity}"
+
+
+class FreeService(models.Model):
+    """
+    One free service given on a bike sale: when, at how many km, how the bike
+    performed and what was done. ``number`` is 1 for the first, 2 for the
+    second and so on.
+    """
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="free_services",
+    )
+    sale = models.ForeignKey(
+        Sale, on_delete=models.CASCADE, related_name="free_service_records"
+    )
+    number = models.PositiveSmallIntegerField()
+    service_date = models.DateField()
+    odometer_km = models.PositiveIntegerField()
+    performance = models.TextField(blank=True)
+    work_done = models.TextField(blank=True)
+    technician = models.CharField(max_length=120, blank=True)
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sale_id", "number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["sale", "number"], name="free_service_unique_number"
+            )
+        ]
+
+    def __str__(self):
+        return f"Free service {self.number} of sale {self.sale_id}"

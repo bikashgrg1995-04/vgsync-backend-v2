@@ -35,6 +35,7 @@ from .models import (
     BikeUnit,
     Customer,
     Followup,
+    FreeService,
     Sale,
     SaleCreditSettlement,
     SaleCreditSettlementItem,
@@ -52,6 +53,9 @@ from .returns import (
 )
 from .serializers import (
     BikeUnitSerializer,
+    FreeServiceCountSerializer,
+    FreeServiceSerializer,
+    FreeServiceWriteSerializer,
     CustomerSerializer,
     DeliverReplacementSerializer,
     FollowupDoneSerializer,
@@ -69,6 +73,9 @@ from .serializers import (
     SaleWriteSerializer,
 )
 from .services import (
+    add_free_service,
+    remove_free_service,
+    set_free_service_count,
     cancel_sale,
     complete_followup,
     confirm_sale,
@@ -296,7 +303,11 @@ class SaleViewSet(SalesBaseViewSet):
     ``paid``), ``sale_date__gte`` / ``__lte``.
     """
 
-    http_method_names = ["get", "post", "patch", "head", "options"]
+    # DELETE is only for removing a free service record (see ``free_service``).
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def destroy(self, request, *args, **kwargs):
+        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
     filterset_fields = {
         "status": ["exact"],
@@ -364,7 +375,14 @@ class SaleViewSet(SalesBaseViewSet):
         queryset = (
             Sale.objects.filter(business=self.request.active_business)
             .select_related("customer")
-            .prefetch_related(Prefetch("items", queryset=items), "payments")
+            .prefetch_related(
+                Prefetch("items", queryset=items),
+                "payments",
+                Prefetch(
+                    "free_service_records",
+                    queryset=FreeService.objects.select_related("recorded_by"),
+                ),
+            )
             .annotate(paid=paid, credit=credit, returned_applied=returned_applied)
             .annotate(
                 due=ExpressionWrapper(
@@ -432,6 +450,61 @@ class SaleViewSet(SalesBaseViewSet):
         serializer.is_valid(raise_exception=True)
 
         sale = update_sale(sale=sale, **serializer.validated_data)
+
+        return self._respond(sale)
+
+    def _free_service_sale(self, write):
+        sale = self.get_object()
+
+        if sale.sale_type != Sale.SaleType.BIKE:
+            raise ValidationError("Free services are only for bike sales.")
+
+        self.need_bike("update" if write else "view")
+
+        return sale
+
+    @action(detail=True, methods=["get", "post"], url_path="free-services")
+    def free_services(self, request, pk=None):
+        """GET the free services done on a bike sale; POST records the next one."""
+        if request.method == "GET":
+            sale = self._free_service_sale(False)
+
+            return Response(FreeServiceSerializer(
+                sale.free_service_records.all(), many=True
+            ).data)
+
+        sale = self._free_service_sale(True)
+        serializer = FreeServiceWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        record = add_free_service(
+            sale=sale, user=request.user, **serializer.validated_data
+        )
+
+        return Response(
+            FreeServiceSerializer(record).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(
+        detail=True,
+        methods=["delete"],
+        url_path=r"free-services/(?P<record_id>\d+)",
+    )
+    def free_service(self, request, pk=None, record_id=None):
+        """Remove the latest free service (a wrong entry)."""
+        sale = self._free_service_sale(True)
+        remove_free_service(sale=sale, record_id=int(record_id))
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], url_path="free-service-count")
+    def free_service_count(self, request, pk=None):
+        """Change how many free services are included, even after the sale is confirmed."""
+        sale = self._free_service_sale(True)
+        serializer = FreeServiceCountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        sale = set_free_service_count(
+            sale=sale, count=serializer.validated_data["free_services"]
+        )
 
         return self._respond(sale)
 

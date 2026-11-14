@@ -30,6 +30,7 @@ from .models import (
     BikeUnit,
     EmiInstallment,
     Followup,
+    FreeService,
     Sale,
     SaleCreditSettlement,
     SaleItem,
@@ -358,6 +359,13 @@ def _header_fields(totals):
     return {k: v for k, v in totals.items() if k != "line_totals"}
 
 
+def _check_free_services(sale):
+    if sale.free_services and sale.sale_type != Sale.SaleType.BIKE:
+        raise serializers.ValidationError(
+            {"free_services": "Free services are only for bike sales."}
+        )
+
+
 @transaction.atomic
 def create_sale(*, business, user, items, **header):
     discount = header.pop("discount_amount", ZERO)
@@ -370,6 +378,7 @@ def create_sale(*, business, user, items, **header):
         **header,
     )
 
+    _check_free_services(sale)
     items = _resolve_items(business, sale.sale_type, items)
 
     totals = calculate_totals(
@@ -416,6 +425,8 @@ def update_sale(*, sale, items=None, **header):
 
     for field, value in header.items():
         setattr(sale, field, value)
+
+    _check_free_services(sale)
 
     if items is None:
         lines = [(i.quantity, i.unit_price) for i in sale.items.all()]
@@ -885,3 +896,111 @@ def register_bike_unit(*, business, product, **fields):
         )
 
     return BikeUnit.objects.create(business=business, product=product, **fields)
+
+
+# ---------------------------------------------------------------------------
+# Free services on a bike sale
+# ---------------------------------------------------------------------------
+
+def _free_service_sale(sale):
+    sale = Sale.objects.select_for_update().get(pk=sale.pk)
+
+    if sale.sale_type != Sale.SaleType.BIKE:
+        raise serializers.ValidationError("Free services are only for bike sales.")
+
+    if sale.status != Sale.Status.CONFIRMED:
+        raise serializers.ValidationError(
+            "Free services can be recorded once the bike sale is confirmed."
+        )
+
+    return sale
+
+
+@transaction.atomic
+def add_free_service(
+    *, sale, user, odometer_km, service_date=None, performance="", work_done="",
+    technician="",
+):
+    """Record the next free service. Checks the count, the date and the km."""
+    from django.utils import timezone
+
+    sale = _free_service_sale(sale)
+    records = list(sale.free_service_records.order_by("number"))
+
+    if len(records) >= sale.free_services:
+        raise serializers.ValidationError(
+            f"All {sale.free_services} free services of this sale are already done."
+            if sale.free_services
+            else "This sale has no free services included."
+        )
+
+    today = timezone.localdate()
+    service_date = service_date or today
+
+    if service_date > today:
+        raise serializers.ValidationError(
+            {"service_date": "The date cannot be in the future."}
+        )
+
+    if service_date < sale.sale_date:
+        raise serializers.ValidationError(
+            {"service_date": "The service cannot be before the sale date."}
+        )
+
+    if records:
+        last = records[-1]
+
+        if service_date < last.service_date:
+            raise serializers.ValidationError(
+                {"service_date": "This cannot be before the previous free service."}
+            )
+
+        if odometer_km < last.odometer_km:
+            raise serializers.ValidationError({
+                "odometer_km": (
+                    f"The km cannot be less than the previous service "
+                    f"({last.odometer_km} km)."
+                )
+            })
+
+    return FreeService.objects.create(
+        business=sale.business,
+        sale=sale,
+        number=(records[-1].number + 1) if records else 1,
+        service_date=service_date,
+        odometer_km=odometer_km,
+        performance=performance,
+        work_done=work_done,
+        technician=technician,
+        recorded_by=user,
+    )
+
+
+@transaction.atomic
+def remove_free_service(*, sale, record_id):
+    """Only the latest record can be removed, so the numbering stays in order."""
+    sale = _free_service_sale(sale)
+    last = sale.free_service_records.order_by("-number").first()
+
+    if last is None or last.pk != record_id:
+        raise serializers.ValidationError(
+            "Only the latest free service can be removed."
+        )
+
+    last.delete()
+
+
+@transaction.atomic
+def set_free_service_count(*, sale, count):
+    sale = _free_service_sale(sale)
+    used = sale.free_service_records.count()
+
+    if count < used:
+        raise serializers.ValidationError({
+            "free_services": f"{used} free services are already done; it cannot be less."
+        })
+
+    sale.free_services = count
+    sale.save(update_fields=["free_services", "updated_at"])
+
+    return sale

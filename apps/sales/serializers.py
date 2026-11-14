@@ -11,6 +11,7 @@ from .models import (
     BikeUnit,
     Customer,
     Followup,
+    FreeService,
     Sale,
     SaleCreditSettlement,
     SaleCreditSettlementItem,
@@ -255,6 +256,10 @@ class SaleWriteSerializer(serializers.Serializer):
         max_length=30, required=False, allow_blank=True
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+    free_services = serializers.IntegerField(
+        min_value=0, max_value=20, required=False,
+        help_text="Bike sales: how many free services come with the bike.",
+    )
     items = SaleItemInputSerializer(many=True, allow_empty=False, max_length=200)
 
     def __init__(self, *args, **kwargs):
@@ -397,6 +402,8 @@ class SaleSerializer(serializers.ModelSerializer):
     returned_amount = serializers.SerializerMethodField()
     remaining_amount = serializers.SerializerMethodField()
     payment_status = serializers.SerializerMethodField()
+    free_services_used = serializers.SerializerMethodField()
+    free_services_left = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -425,6 +432,9 @@ class SaleSerializer(serializers.ModelSerializer):
             "first_emi_due",
             "interest_rate",
             "finance_charge",
+            "free_services",
+            "free_services_used",
+            "free_services_left",
             "amount_due",
             "due_date",
             "vehicle_chassis_no",
@@ -484,6 +494,12 @@ class SaleSerializer(serializers.ModelSerializer):
     def get_payment_status(self, obj):
         return payment_status(obj.amount_due, self._settled(obj))
 
+    def get_free_services_used(self, obj):
+        return len(obj.free_service_records.all())
+
+    def get_free_services_left(self, obj):
+        return max(obj.free_services - len(obj.free_service_records.all()), 0)
+
 
 class InstallmentSerializer(serializers.Serializer):
     id = serializers.IntegerField()
@@ -494,12 +510,52 @@ class InstallmentSerializer(serializers.Serializer):
     status = serializers.CharField()
 
 
+class FreeServiceSerializer(serializers.ModelSerializer):
+    recorded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FreeService
+        fields = (
+            "id",
+            "number",
+            "service_date",
+            "odometer_km",
+            "performance",
+            "work_done",
+            "technician",
+            "recorded_by_name",
+            "created_at",
+        )
+
+    def get_recorded_by_name(self, obj):
+        user = obj.recorded_by
+
+        return (user.get_full_name() or user.username) if user else ""
+
+
+class FreeServiceWriteSerializer(serializers.Serializer):
+    service_date = serializers.DateField(required=False)
+    odometer_km = serializers.IntegerField(min_value=0, max_value=9_999_999)
+    performance = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    work_done = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    technician = serializers.CharField(required=False, allow_blank=True, max_length=120)
+
+
+class FreeServiceCountSerializer(serializers.Serializer):
+    free_services = serializers.IntegerField(min_value=0, max_value=20)
+
+
 class SaleDetailSerializer(SaleSerializer):
     payments = SalePaymentSerializer(many=True, read_only=True)
     installments = serializers.SerializerMethodField()
+    free_service_records = FreeServiceSerializer(many=True, read_only=True)
 
     class Meta(SaleSerializer.Meta):
-        fields = SaleSerializer.Meta.fields + ("payments", "installments")
+        fields = SaleSerializer.Meta.fields + (
+            "payments",
+            "installments",
+            "free_service_records",
+        )
 
     def get_installments(self, obj):
         return InstallmentSerializer(installment_rows(obj), many=True).data
