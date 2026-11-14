@@ -57,6 +57,7 @@ CATALOG = {
         "discount": "Give discounts",
         "refund": "Refund customers",
         "approve": "Approve exceptional sales",
+        "collect": "Record customer and company payments",
     },
     "bike_sales": {
         "view": "View bike sales",
@@ -77,6 +78,7 @@ CATALOG = {
         "delete": "Delete income and expenses",
         "void": "Void income and expenses",
         "approve": "Approve high-value expenses",
+        "reconcile": "Reconcile cash and bank, set opening balances",
     },
     "reports": {
         "view": "View reports",
@@ -89,6 +91,8 @@ CATALOG = {
         "delete": "Deactivate staff",
         "assign_position": "Assign positions",
         "manage_permissions": "Manage permissions",
+        "pay_view": "See salaries and pay records",
+        "pay": "Record salary and advance payments",
     },
     "reminders": {"view": "View reminders"},
     "tasks": {
@@ -110,8 +114,11 @@ RESERVED = frozenset({
     "staff.manage_permissions",
 })
 
+# What colleagues earn and are paid. Not part of the Administrator preset.
+PAY_CODES = frozenset({"staff.pay_view", "staff.pay"})
+
 # Codes that only read. These are the only ones a read-only context keeps.
-READ_ACTIONS = frozenset({"view", "export"})
+READ_ACTIONS = frozenset({"view", "export", "pay_view"})
 
 # The four classic flags stored as columns on PositionPermission.
 FLAG_ACTIONS = ("view", "create", "update", "delete")
@@ -182,7 +189,9 @@ PRESETS = {
             module: [
                 action
                 for action in actions
-                if f"{module}.{action}" not in RESERVED
+                # Salaries stay with the owner (and the Accountant) unless
+                # the owner adds the pay codes on purpose.
+                if f"{module}.{action}" not in RESERVED | PAY_CODES
             ]
             for module, actions in CATALOG.items()
         },
@@ -209,9 +218,15 @@ PRESETS = {
         "department": "Finance",
         "grants": {
             "dashboard": ["view"],
-            "finance": ["view", "create", "update", "delete", "void"],
+            "finance": [
+                "view", "create", "update", "delete", "void", "reconcile",
+            ],
             "reports": ["view", "export"],
-            **_view("sales", "purchases", "inventory"),
+            "sales": ["view", "collect"],
+            "bike_sales": ["view"],
+            "purchases": ["view", "pay"],
+            "inventory": ["view"],
+            "staff": ["pay_view", "pay"],
             "reminders": ["view"],
         },
     },

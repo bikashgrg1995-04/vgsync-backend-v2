@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.dates import parse_query_date
-from apps.common.permissions import HasActiveBusinessContext, IsOwner
+from apps.common.permissions import HasActiveBusinessContext, OwnerOrPermission
 
 from .models import Expense, Income, OpeningBalance, Reconciliation
 from .services import method_balance
@@ -21,7 +21,11 @@ MONEY = {"max_digits": 14, "decimal_places": 2}
 
 
 class OwnerView(APIView):
-    permission_classes = [IsAuthenticated, HasActiveBusinessContext, IsOwner]
+    permission_classes = [
+        IsAuthenticated, HasActiveBusinessContext, OwnerOrPermission,
+    ]
+    read_permission = "finance.reconcile"
+    write_permission = "finance.reconcile"
 
 
 def _money(value):

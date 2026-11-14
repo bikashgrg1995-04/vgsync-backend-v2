@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from apps.accounts.scope import scoped_users
 from apps.common.pagination import StandardPagination
-from apps.common.permissions import IsOwner
+from apps.common.permissions import IsOwner, OwnerOrPermission
 
 from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile, WorkDay
 from .serializers import (
@@ -106,7 +106,8 @@ def summary(staff, profile, bal):
 class SalaryListView(generics.ListAPIView):
     """How each team member is paid."""
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
     serializer_class = SalaryProfileSerializer
     filterset_fields = ("pay_type",)
     search_fields = ("user__username", "user__first_name", "user__last_name")
@@ -122,7 +123,8 @@ class SalaryListView(generics.ListAPIView):
 class SalaryDetailView(APIView):
     """``GET`` a team member's pay setup, or ``PUT`` to set or change it."""
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
 
     def _staff(self, request, staff_id):
         return get_object_or_404(
@@ -182,7 +184,8 @@ class BalanceListView(APIView):
     ``pay_type``, ``search``.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
 
     def get(self, request):
         staff_qs = scoped_users(request.active_business)
@@ -307,7 +310,8 @@ def statement_response(request, staff):
 class BalanceDetailView(APIView):
     """One person's account, with each unsettled amount listed."""
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
 
     def get(self, request, staff_id):
         staff = get_object_or_404(
@@ -325,7 +329,8 @@ class StatementView(APIView):
     (or paid ahead as an advance) after each line.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
 
     def get(self, request, staff_id):
         staff = get_object_or_404(
@@ -366,7 +371,9 @@ class PayrollEntryViewSet(viewsets.ModelViewSet):
     when the salary day comes). Entries are voided, not deleted.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
+    write_permission = "staff.pay"
     serializer_class = PayrollEntrySerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
 
@@ -413,7 +420,9 @@ class PayrollPaymentViewSet(viewsets.ModelViewSet):
     salary expense. A payment cannot be edited; void it and add a new one.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
+    write_permission = "staff.pay"
     serializer_class = PayrollPaymentSerializer
     http_method_names = ["get", "post", "head", "options"]
 
@@ -540,7 +549,9 @@ class WorkSheetView(APIView):
     mark for the day, and ``POST`` saves marks for several people at once.
     """
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
+    write_permission = "staff.pay"
 
     def _day(self, request):
         from datetime import date as _date
@@ -591,7 +602,8 @@ class WorkSheetView(APIView):
 class StaffAttendanceView(APIView):
     """``GET workdays/staff/<id>/?month=YYYY-MM`` — one person's marks for a month."""
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
 
     def get(self, request, staff_id):
         from calendar import monthrange

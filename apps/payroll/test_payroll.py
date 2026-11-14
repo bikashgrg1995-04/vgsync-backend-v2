@@ -751,7 +751,8 @@ class PayrollAccessTests(PayrollTestCase):
                 username, "staff", company=self.company, position=position
             )
 
-        for username in ("adm", "acc", "ram"):
+        # The Accountant holds the pay codes (see apps.accounts.test_accountant).
+        for username in ("adm", "ram"):
             self.authenticate("ACME-HO", username, password=self.password)
 
             # Payroll stays with the owner. (Plain expenses follow the

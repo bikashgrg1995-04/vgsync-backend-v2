@@ -173,3 +173,39 @@ class HasPermission(BasePermission):
         return rbac.has_permission(
             user, code, getattr(request, "access_mode", "full")
         )
+
+
+class OwnerOrPermission(BasePermission):
+    """
+    The owner (``IsOwner`` rules: read-only for a company owner inside a
+    Branch), or staff holding a code. Set ``read_permission`` for safe
+    methods and ``write_permission`` for the rest on the view; a missing one
+    keeps that side owner-only.
+    """
+
+    message = "You do not have permission to perform this action."
+
+    def has_permission(self, request, view):
+        user = request.user
+        business = getattr(request, "active_business", None)
+
+        if not user or not user.is_authenticated or business is None:
+            return False
+
+        if user.role == User.Role.OWNER:
+            return IsOwner().has_permission(request, view)
+
+        if request.method == "OPTIONS":
+            return True
+
+        if request.method in SAFE_METHODS:
+            code = getattr(view, "read_permission", None)
+        else:
+            code = getattr(view, "write_permission", None)
+
+        if not code:
+            return False
+
+        return rbac.has_permission(
+            user, code, getattr(request, "access_mode", "full")
+        )

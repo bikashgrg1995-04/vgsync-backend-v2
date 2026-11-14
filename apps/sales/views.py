@@ -26,7 +26,7 @@ from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts import rbac
@@ -773,12 +773,42 @@ class SaleViewSet(SalesBaseViewSet):
 # Customer payments
 # ---------------------------------------------------------------------------
 
+class CanCollectPayments(BasePermission):
+    """
+    Recording or voiding a customer or company payment: ``sales.collect``
+    (the accountant) or the right to create or edit sales. Reading follows
+    the normal ``sales.view``.
+    """
+
+    message = "You do not have permission to record payments."
+
+    def has_permission(self, request, view):
+        user = request.user
+
+        if request.method in SAFE_METHODS or request.method == "OPTIONS":
+            return HasModulePermission().has_permission(request, view)
+
+        if not HasActiveBusinessContext().has_permission(request, view):
+            return False
+
+        mode = getattr(request, "access_mode", "full")
+
+        return any(
+            rbac.has_permission(user, code, mode)
+            for code in ("sales.collect", "sales.create", "sales.update")
+        )
+
+
 class SalePaymentViewSet(SalesBaseViewSet):
     """
     Money received from customers: full or part, also before the sale is
     confirmed. A payment cannot be edited; void it with a reason.
+    Recording needs ``sales.collect`` (or create/edit on sales).
     """
 
+    permission_classes = [
+        IsAuthenticated, HasActiveBusinessContext, CanCollectPayments,
+    ]
     serializer_class = SalePaymentSerializer
     http_method_names = ["get", "post", "head", "options"]
 
@@ -792,6 +822,16 @@ class SalePaymentViewSet(SalesBaseViewSet):
     search_fields = ("reference", "sale__customer__name", "sale__walk_in_name")
     ordering_fields = ("paid_on", "amount", "created_at")
     ordering = ("-paid_on", "-id")
+
+    def need_bike_collect(self):
+        # A collector (accountant) records bike-sale money without being
+        # allowed to edit bike sales; they must at least see them.
+        mode = getattr(self.request, "access_mode", "full")
+
+        if rbac.has_permission(self.request.user, "sales.collect", mode):
+            self.need_bike("view")
+        else:
+            self.need_bike("update")
 
     def get_queryset(self):
         queryset = SalePayment.objects.filter(
@@ -809,7 +849,7 @@ class SalePaymentViewSet(SalesBaseViewSet):
         data = serializer.validated_data
 
         if data["sale"].sale_type == Sale.SaleType.BIKE:
-            self.need_bike("update")
+            self.need_bike_collect()
 
         payment = create_payment(
             sale=data["sale"],
@@ -834,7 +874,7 @@ class SalePaymentViewSet(SalesBaseViewSet):
         payment = self.get_object()
 
         if payment.sale.sale_type == Sale.SaleType.BIKE:
-            self.need_bike("update")
+            self.need_bike_collect()
 
         payment = void_payment(
             payment=payment,

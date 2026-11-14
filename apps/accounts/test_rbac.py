@@ -182,7 +182,7 @@ class AccessApiTests(TenantTestMixin, APITestCase):
         self.assertIn("accountant", [p["key"] for p in presets.data])
         self.assertEqual(catalogue.status_code, 200)
 
-    def test_an_accountant_position_reaches_finance_but_not_payroll(self):
+    def test_an_accountant_position_reaches_finance_and_pay_but_not_pay_setup(self):
         position = self.make_position(self.ho, "Accountant")
         rbac.write_position_codes(position, rbac.preset_codes("accountant"))
         self.make_user(
@@ -191,4 +191,5 @@ class AccessApiTests(TenantTestMixin, APITestCase):
         self.authenticate("ACME-HO", "acc")
 
         self.assertEqual(self.client.get(EXPENSES).status_code, 200)
-        self.assertEqual(self.client.get("/api/v1/payroll/salaries/").status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/payroll/salaries/").status_code, 200)
+        self.assertEqual(self.client.put("/api/v1/payroll/salaries/1/", {}, format="json").status_code, 403)
