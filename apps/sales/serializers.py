@@ -284,6 +284,8 @@ class SaleWriteSerializer(serializers.Serializer):
     free_service_for = serializers.PrimaryKeyRelatedField(
         queryset=Sale.objects.none(), required=False, allow_null=True
     )
+    # Maintenance, when it is opened: hand the job to a technician at once.
+    technician = serializers.IntegerField(required=False, allow_null=True)
     odometer_km = serializers.IntegerField(
         min_value=0, max_value=9_999_999, required=False, allow_null=True
     )
@@ -454,6 +456,7 @@ class SaleSerializer(serializers.ModelSerializer):
     documents_verified = serializers.SerializerMethodField()
     financer_receivable = serializers.SerializerMethodField()
     financer_received = serializers.SerializerMethodField()
+    technician_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -497,6 +500,13 @@ class SaleSerializer(serializers.ModelSerializer):
             "free_service_for_covers",
             "odometer_km",
             "documents_ignored",
+            "technician",
+            "technician_name",
+            "job_status",
+            "job_assigned_at",
+            "job_started_at",
+            "job_done_at",
+            "job_notes",
             "documents_total",
             "documents_verified",
             "amount_due",
@@ -557,6 +567,11 @@ class SaleSerializer(serializers.ModelSerializer):
 
     def get_payment_status(self, obj):
         return payment_status(obj.amount_due, self._settled(obj))
+
+    def get_technician_name(self, obj):
+        user = obj.technician
+
+        return (user.get_full_name() or user.username) if user else ""
 
     def get_financer_receivable(self, obj):
         """What the company is to pay the dealer (the total less the down payment)."""
@@ -687,6 +702,62 @@ class SaleDocumentUploadSerializer(serializers.Serializer):
             raise serializers.ValidationError("The file is empty.")
 
         return upload
+
+
+class JobAssignSerializer(serializers.Serializer):
+    technician = serializers.IntegerField(allow_null=True)
+
+
+class JobDoneSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+
+class MyJobSerializer(serializers.ModelSerializer):
+    """A job as its technician sees it: the work, never the prices."""
+
+    customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+    free_service_for_no = serializers.CharField(
+        source="free_service_for.sale_no", default=None, read_only=True
+    )
+    work = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Sale
+        fields = (
+            "id",
+            "sale_no",
+            "sale_date",
+            "service_kind",
+            "free_service_for_no",
+            "customer_name",
+            "customer_phone",
+            "vehicle_chassis_no",
+            "vehicle_reg_no",
+            "odometer_km",
+            "notes",
+            "work",
+            "job_status",
+            "job_assigned_at",
+            "job_started_at",
+            "job_done_at",
+            "job_notes",
+        )
+
+    def get_customer_name(self, obj):
+        return obj.customer.name if obj.customer_id else obj.walk_in_name
+
+    def get_customer_phone(self, obj):
+        return obj.customer.phone if obj.customer_id else ""
+
+    def get_work(self, obj):
+        return [
+            {
+                "description": i.description or (i.product.name if i.product_id else ""),
+                "quantity": str(i.quantity),
+            }
+            for i in obj.items.all()
+        ]
 
 
 class FreeServiceWriteSerializer(serializers.Serializer):

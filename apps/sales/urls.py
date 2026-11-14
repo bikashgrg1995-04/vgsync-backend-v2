@@ -4,6 +4,7 @@ from .views import (
     BikeUnitViewSet,
     FollowupViewSet,
     LocalProductViewSet,
+    MyJobsViewSet,
     SaleCreditViewSet,
     SalePaymentViewSet,
     SaleReturnViewSet,
@@ -15,6 +16,7 @@ app_name = "sales"
 router = SimpleRouter()
 # Registered before the empty prefix so "payments/" is not read as a sale id.
 # Customers have their own section: see ``apps.parties``.
+router.register("my-jobs", MyJobsViewSet, basename="my-jobs")
 router.register("payments", SalePaymentViewSet, basename="payments")
 router.register("bikes", BikeUnitViewSet, basename="bikes")
 router.register("followups", FollowupViewSet, basename="followups")

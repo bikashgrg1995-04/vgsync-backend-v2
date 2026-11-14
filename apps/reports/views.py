@@ -276,3 +276,18 @@ class DashboardView(APIView):
                 timezone.localdate(),
             )
         )
+
+
+class TechnicianPerformanceView(OwnerReport):
+    """Jobs given to each technician and how many he finished, and how fast."""
+
+    def get(self, request):
+        date_from, date_to = _range(request)
+
+        return Response({
+            "date_from": date_from,
+            "date_to": date_to,
+            **queries.technician_performance(
+                request.active_business, date_from, date_to
+            ),
+        })

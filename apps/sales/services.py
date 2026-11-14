@@ -780,8 +780,9 @@ def _log_free_job(sale, user):
         user=user,
         odometer_km=sale.odometer_km,
         service_date=sale.sale_date,
-        performance="",
+        performance=sale.job_notes[:2000],
         work_done=work[:2000],
+        technician=_technician_name(sale),
     )
     record.service_sale = sale
     record.save(update_fields=["service_sale"])
@@ -1314,3 +1315,138 @@ def set_free_service_count(*, sale, count, covers=None):
     sync_free_service_followups(sale)
 
     return sale
+
+
+# ---------------------------------------------------------------------------
+# Jobs: giving a maintenance sale to a technician
+# ---------------------------------------------------------------------------
+
+def _job_sale(sale):
+    sale = Sale.objects.select_for_update().select_related("business").get(pk=sale.pk)
+
+    if sale.sale_type != Sale.SaleType.MAINTENANCE:
+        raise serializers.ValidationError("Only a maintenance sale is a job.")
+
+    if sale.status == Sale.Status.CANCELLED:
+        raise Conflict("A cancelled sale has no job.", code="invalid_status")
+
+    return sale
+
+
+@transaction.atomic
+def assign_technician(*, sale, technician, by):
+    """Give the job to a technician, take it from one, or hand it to another."""
+    from apps.accounts.scope import scoped_users
+    from apps.notifications.models import Notification
+    from apps.notifications.services import notify
+
+    sale = _job_sale(sale)
+
+    if sale.job_status == Sale.JobStatus.DONE:
+        raise Conflict("This job is already done.", code="job_done")
+
+    if technician is not None and not scoped_users(sale.business).filter(
+        pk=technician.pk, is_active=True
+    ).exists():
+        raise serializers.ValidationError(
+            {"technician": "Choose an active staff member of this business."}
+        )
+
+    if technician == sale.technician:
+        return sale
+
+    sale.technician = technician
+    sale.job_status = Sale.JobStatus.PENDING
+    sale.job_assigned_at = timezone.now() if technician else None
+    sale.job_started_at = None
+    sale.save(update_fields=[
+        "technician", "job_status", "job_assigned_at", "job_started_at",
+        "updated_at",
+    ])
+
+    if technician is not None and technician != by:
+        notify(
+            sale.business,
+            technician,
+            Notification.Kind.JOB_ASSIGNED,
+            f"New job: {sale.sale_no}",
+            "A service job was given to you.",
+            link="/dashboard/my-jobs",
+        )
+
+    return sale
+
+
+def _may_work_on(sale, user, may_manage):
+    return may_manage or sale.technician_id == user.pk
+
+
+@transaction.atomic
+def start_job(*, sale, user, may_manage=False):
+    sale = _job_sale(sale)
+
+    if not _may_work_on(sale, user, may_manage):
+        raise Conflict("This job is not yours.", code="not_your_job")
+
+    if sale.technician_id is None:
+        raise serializers.ValidationError("Give the job to a technician first.")
+
+    if sale.job_status != Sale.JobStatus.PENDING:
+        raise Conflict(
+            f"This job is already {sale.get_job_status_display().lower()}.",
+            code="invalid_status",
+        )
+
+    sale.job_status = Sale.JobStatus.IN_PROGRESS
+    sale.job_started_at = timezone.now()
+    sale.save(update_fields=["job_status", "job_started_at", "updated_at"])
+
+    return sale
+
+
+@transaction.atomic
+def finish_job(*, sale, user, notes="", may_manage=False):
+    """Mark the job done. A free service also gets the technician and notes."""
+    sale = _job_sale(sale)
+
+    if not _may_work_on(sale, user, may_manage):
+        raise Conflict("This job is not yours.", code="not_your_job")
+
+    if sale.technician_id is None:
+        raise serializers.ValidationError("Give the job to a technician first.")
+
+    if sale.job_status == Sale.JobStatus.DONE:
+        raise Conflict("This job is already done.", code="invalid_status")
+
+    now = timezone.now()
+    sale.job_status = Sale.JobStatus.DONE
+    sale.job_started_at = sale.job_started_at or now
+    sale.job_done_at = now
+    sale.job_notes = notes.strip()
+    sale.save(update_fields=[
+        "job_status", "job_started_at", "job_done_at", "job_notes", "updated_at",
+    ])
+    _sync_free_record(sale)
+
+    return sale
+
+
+def _technician_name(sale):
+    user = sale.technician
+
+    return (user.get_full_name() or user.username)[:120] if user else ""
+
+
+def _sync_free_record(sale):
+    """Carry the technician and notes into the free-service record."""
+    record = sale.free_service_logged.first()
+
+    if record is None:
+        return
+
+    record.technician = _technician_name(sale)
+
+    if sale.job_notes:
+        record.performance = sale.job_notes[:2000]
+
+    record.save(update_fields=["technician", "performance"])

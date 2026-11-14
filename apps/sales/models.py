@@ -250,6 +250,27 @@ class Sale(models.Model):
         related_name="free_service_jobs",
     )
     odometer_km = models.PositiveIntegerField(null=True, blank=True)
+
+    # Maintenance only: the mechanic given the job, and how it is going.
+    class JobStatus(models.TextChoices):
+        PENDING = "pending", "Not started"
+        IN_PROGRESS = "in_progress", "In progress"
+        DONE = "done", "Done"
+
+    technician = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    job_status = models.CharField(
+        max_length=12, choices=JobStatus.choices, default=JobStatus.PENDING
+    )
+    job_assigned_at = models.DateTimeField(null=True, blank=True)
+    job_started_at = models.DateTimeField(null=True, blank=True)
+    job_done_at = models.DateTimeField(null=True, blank=True)
+    job_notes = models.TextField(blank=True)
     # The owner went ahead although the accident papers were not all verified.
     documents_ignored = models.BooleanField(default=False)
 

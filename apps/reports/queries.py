@@ -710,3 +710,71 @@ def payroll_summary(business, date_from, date_to):
             for key, v in sorted(months.items())
         ],
     }
+
+
+def technician_performance(business, date_from=None, date_to=None):
+    """
+    How each technician did on the maintenance jobs given to him in the
+    period (by the day the job was given). Hours run from when the job was
+    started to when it was done.
+    """
+    from apps.sales.models import Sale
+
+    jobs = Sale.objects.filter(
+        business=business,
+        sale_type=Sale.SaleType.MAINTENANCE,
+        technician__isnull=False,
+    ).exclude(status=Sale.Status.CANCELLED).select_related("technician")
+
+    if date_from:
+        jobs = jobs.filter(job_assigned_at__date__gte=date_from)
+
+    if date_to:
+        jobs = jobs.filter(job_assigned_at__date__lte=date_to)
+
+    people = {}
+
+    for job in jobs:
+        user = job.technician
+        row = people.setdefault(user.pk, {
+            "technician": user.pk,
+            "name": user.get_full_name() or user.username,
+            "assigned": 0,
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "normal": 0,
+            "free": 0,
+            "accident": 0,
+            "billed": ZERO,
+            "_hours": [],
+        })
+        row["assigned"] += 1
+        row[job.job_status] += 1
+
+        if job.job_status == Sale.JobStatus.DONE:
+            row[{"paid": "normal"}.get(job.service_kind, job.service_kind)] += 1
+            row["billed"] += job.net_total
+
+            if job.job_started_at and job.job_done_at:
+                row["_hours"].append(
+                    (job.job_done_at - job.job_started_at).total_seconds() / 3600
+                )
+
+    rows = []
+
+    for row in people.values():
+        hours = row.pop("_hours")
+        row["average_hours"] = round(sum(hours) / len(hours), 1) if hours else None
+        row["billed"] = money(row["billed"])
+        rows.append(row)
+
+    rows.sort(key=lambda r: (-r["done"], r["name"]))
+
+    return {
+        "rows": rows,
+        "totals": {
+            "assigned": sum(r["assigned"] for r in rows),
+            "done": sum(r["done"] for r in rows),
+        },
+    }

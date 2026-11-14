@@ -5,6 +5,8 @@ permission. Writes need full access to the business.
 
 from decimal import Decimal
 
+from datetime import timedelta
+
 from django.db import transaction
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -55,6 +57,9 @@ from .returns import (
 )
 from .serializers import (
     BikeUnitSerializer,
+    JobAssignSerializer,
+    JobDoneSerializer,
+    MyJobSerializer,
     SaleDocumentSerializer,
     SaleDocumentUploadSerializer,
     FreeServiceCountSerializer,
@@ -77,6 +82,9 @@ from .serializers import (
     SaleWriteSerializer,
 )
 from .services import (
+    assign_technician,
+    finish_job,
+    start_job,
     add_free_service,
     remove_free_service,
     set_free_service_count,
@@ -100,7 +108,13 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
     ]
     permission_module = "sales"
     # ``cancel`` needs its own permission; the rest follow the HTTP method.
-    permission_actions = {"cancel": "cancel"}
+    permission_actions = {
+        "cancel": "cancel",
+        "technicians": "view",
+        "assign_technician": "update",
+        "job_start": "update",
+        "job_done": "update",
+    }
 
     # Bike sales and their instalments belong to the owner and to staff who
     # were given the ``bike_sales`` permissions; everyone else neither sees
@@ -427,6 +441,7 @@ class SaleViewSet(SalesBaseViewSet):
 
         data = dict(serializer.validated_data)
         data.setdefault("sale_date", timezone.localdate())
+        technician_id = data.pop("technician", None)
         advance = data.pop("advance_amount", None)
         method = data.pop("advance_method", None)
         accident = data.get("service_kind") == Sale.ServiceKind.ACCIDENT
@@ -471,6 +486,14 @@ class SaleViewSet(SalesBaseViewSet):
                     notes="Advance",
                 )
 
+            if technician_id is not None:
+                assign_technician(
+                    sale=sale,
+                    technician=self._technician(technician_id),
+                    by=request.user,
+                )
+                sale.refresh_from_db()
+
         return self._respond(sale, status.HTTP_201_CREATED)
 
     def partial_update(self, request, *args, **kwargs):
@@ -489,12 +512,78 @@ class SaleViewSet(SalesBaseViewSet):
 
         data = dict(serializer.validated_data)
 
+        if "technician" in data:
+            raise ValidationError(
+                {"technician": "Use the assign technician action for this."}
+            )
+
         if "advance_amount" in data or "advance_method" in data:
             raise ValidationError(
                 {"advance_amount": "Take the advance as a payment on the sale."}
             )
 
         sale = update_sale(sale=sale, **data)
+
+        return self._respond(sale)
+
+    def _technician(self, user_id):
+        from apps.accounts.scope import scoped_users
+
+        if user_id is None:
+            return None
+
+        user = scoped_users(self.request.active_business).filter(
+            pk=user_id, is_active=True
+        ).first()
+
+        if user is None:
+            raise ValidationError(
+                {"technician": "Choose an active staff member of this business."}
+            )
+
+        return user
+
+    @action(detail=False, methods=["get"])
+    def technicians(self, request):
+        """Staff a maintenance job can be given to."""
+        from apps.accounts.scope import scoped_users
+        from apps.tasks.serializers import person
+
+        users = scoped_users(request.active_business).filter(
+            is_active=True
+        ).select_related("position")
+
+        return Response([person(u) for u in users.order_by("first_name", "username")])
+
+    @action(detail=True, methods=["post"], url_path="assign-technician")
+    def assign_technician(self, request, pk=None):
+        sale = self.get_object()
+        serializer = JobAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        sale = assign_technician(
+            sale=sale,
+            technician=self._technician(serializer.validated_data["technician"]),
+            by=request.user,
+        )
+
+        return self._respond(sale)
+
+    @action(detail=True, methods=["post"], url_path="job-start")
+    def job_start(self, request, pk=None):
+        sale = start_job(sale=self.get_object(), user=request.user, may_manage=True)
+
+        return self._respond(sale)
+
+    @action(detail=True, methods=["post"], url_path="job-done")
+    def job_done(self, request, pk=None):
+        serializer = JobDoneSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        sale = finish_job(
+            sale=self.get_object(),
+            user=request.user,
+            notes=serializer.validated_data.get("notes", ""),
+            may_manage=True,
+        )
 
         return self._respond(sale)
 
@@ -1095,3 +1184,58 @@ class LocalProductViewSet(SalesBaseViewSet):
             product.save(update_fields=["is_active", "updated_at"])
 
         return Response(self.get_serializer(product).data)
+
+
+class MyJobsViewSet(viewsets.ViewSet):
+    """
+    The jobs given to the signed-in technician. Needs no sales permission: it
+    shows the work and the customer, never a price, and only his own jobs.
+    """
+
+    permission_classes = [IsAuthenticated, HasActiveBusinessContext]
+
+    def _jobs(self, request):
+        return (
+            Sale.objects.filter(
+                business=request.active_business,
+                sale_type=Sale.SaleType.MAINTENANCE,
+                technician=request.user,
+            )
+            .exclude(status=Sale.Status.CANCELLED)
+            .select_related("customer", "free_service_for")
+            .prefetch_related("items__product")
+        )
+
+    def list(self, request):
+        cutoff = timezone.now() - timedelta(days=30)
+        jobs = self._jobs(request).filter(
+            Q(job_status__in=[Sale.JobStatus.PENDING, Sale.JobStatus.IN_PROGRESS])
+            | Q(job_done_at__gte=cutoff)
+        )
+        order = {"in_progress": 0, "pending": 1, "done": 2}
+        rows = sorted(jobs, key=lambda j: (order[j.job_status], j.job_assigned_at or j.created_at))
+
+        return Response(MyJobSerializer(rows, many=True).data)
+
+    def _own(self, request, pk):
+        from django.shortcuts import get_object_or_404
+
+        return get_object_or_404(self._jobs(request), pk=pk)
+
+    @action(detail=True, methods=["post"])
+    def start(self, request, pk=None):
+        sale = start_job(sale=self._own(request, pk), user=request.user)
+
+        return Response(MyJobSerializer(self._own(request, sale.pk)).data)
+
+    @action(detail=True, methods=["post"])
+    def done(self, request, pk=None):
+        serializer = JobDoneSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        sale = finish_job(
+            sale=self._own(request, pk),
+            user=request.user,
+            notes=serializer.validated_data.get("notes", ""),
+        )
+
+        return Response(MyJobSerializer(self._own(request, sale.pk)).data)
