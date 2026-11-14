@@ -78,6 +78,7 @@ CATALOG = {
         "delete": "Delete income and expenses",
         "void": "Void income and expenses",
         "approve": "Approve high-value expenses",
+        "manage_rules": "Set approval limits",
         "reconcile": "Reconcile cash and bank, set opening balances",
     },
     "reports": {
@@ -91,6 +92,8 @@ CATALOG = {
         "delete": "Deactivate staff",
         "assign_position": "Assign positions",
         "manage_permissions": "Manage permissions",
+        "view_audit": "See the change history (audit log)",
+        "manage_positions": "Create and edit positions",
         "pay_view": "See salaries and pay records",
         "pay": "Record salary and advance payments",
     },
@@ -118,7 +121,7 @@ RESERVED = frozenset({
 PAY_CODES = frozenset({"staff.pay_view", "staff.pay"})
 
 # Codes that only read. These are the only ones a read-only context keeps.
-READ_ACTIONS = frozenset({"view", "export", "pay_view"})
+READ_ACTIONS = frozenset({"view", "export", "pay_view", "view_audit"})
 
 # The four classic flags stored as columns on PositionPermission.
 FLAG_ACTIONS = ("view", "create", "update", "delete")

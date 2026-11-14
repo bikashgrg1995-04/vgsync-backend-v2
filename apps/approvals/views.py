@@ -6,7 +6,7 @@ from rest_framework.response import Response
 
 from apps.accounts import rbac
 from apps.accounts.models import User
-from apps.common.permissions import HasActiveBusinessContext, IsOwner
+from apps.common.permissions import HasActiveBusinessContext, OwnerOrPermission
 
 from .models import APPROVER_PERMISSION, ApprovalRequest, ApprovalRule
 from .serializers import ApprovalRequestSerializer, ApprovalRuleSerializer
@@ -14,9 +14,11 @@ from .services import decide
 
 
 class ApprovalRuleViewSet(viewsets.ModelViewSet):
-    """Approval thresholds of the active business. Owner only."""
+    """Approval thresholds. Owner, or ``finance.manage_rules``."""
 
-    permission_classes = [IsOwner]
+    permission_classes = [OwnerOrPermission]
+    read_permission = "finance.manage_rules"
+    write_permission = "finance.manage_rules"
     serializer_class = ApprovalRuleSerializer
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
     filterset_fields = ("kind", "is_active")

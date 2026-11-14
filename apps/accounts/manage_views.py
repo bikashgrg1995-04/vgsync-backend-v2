@@ -19,7 +19,7 @@ from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 
 from apps.common.exceptions import Conflict
-from apps.common.permissions import CanManageTeam, IsOwner
+from apps.common.permissions import CanManageTeam, IsOwner, OwnerOrPermission
 
 from . import rbac
 from .manage_serializers import (
@@ -338,7 +338,10 @@ class PositionViewSet(viewsets.ModelViewSet):
         if self.request.method in ("GET", "HEAD", "OPTIONS"):
             return [CanManageTeam()]
 
-        return [IsOwner()]
+        return [OwnerOrPermission()]
+
+    # Writes: the owner, or staff holding ``staff.manage_positions``.
+    write_permission = "staff.manage_positions"
 
     filterset_fields = ("is_active",)
     search_fields = ("name", "description")

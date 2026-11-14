@@ -524,6 +524,19 @@ class PositionSerializer(serializers.ModelSerializer):
                     f"{code} belongs to the owner only."
                 )
 
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        # A delegated administrator cannot grant more than they hold.
+        if user is not None and user.role != User.Role.OWNER:
+            own = rbac.effective_permissions(user)
+            extra = sorted(set(value) - own)
+
+            if extra:
+                raise serializers.ValidationError(
+                    f"You cannot grant what you do not hold: {', '.join(extra)}."
+                )
+
         return sorted(set(value))
 
     def validate(self, attrs):
