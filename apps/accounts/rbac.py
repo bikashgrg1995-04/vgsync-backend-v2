@@ -287,6 +287,15 @@ PRESETS = {
             **_view("inventory"),
         },
     },
+    # A mechanic. Sees stock and prices to check parts, but nothing else of
+    # the business. His own tasks, pay and profile need no permission.
+    "technician": {
+        "label": "Technician",
+        "department": "Workshop",
+        "grants": {
+            **_view("inventory"),
+        },
+    },
     "hr_manager": {
         "label": "HR / Staff Manager",
         "department": "HR",

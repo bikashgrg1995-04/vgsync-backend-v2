@@ -81,6 +81,36 @@ class ResolverTests(TenantTestMixin, APITestCase):
             self.assertTrue(codes <= rbac.delegable_codes(), key)
 
 
+class TechnicianPresetTests(TenantTestMixin, APITestCase):
+    """A technician sees stock and prices and his own work, and nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(rbac.preset_codes("technician"), {"inventory.view"})
+        position = self.make_position(self.ho, "Technician", inventory=("view",))
+        self.tech = self.make_user(
+            "tech", User.Role.STAFF, company=self.company, position=position
+        )
+        self.authenticate("ACME-HO", "tech")
+
+    def test_he_can_look_at_stock_and_prices(self):
+        response = self.client.get("/api/v1/inventory/products/")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_he_cannot_change_stock_or_see_sales_money_or_staff(self):
+        self.assertEqual(
+            self.client.post("/api/v1/inventory/products/", {}, format="json").status_code, 403
+        )
+        for url in ("/api/v1/sales/", "/api/v1/finance/income/", "/api/v1/staff/"):
+            self.assertEqual(self.client.get(url).status_code, 403, url)
+
+    def test_he_sees_his_own_pay_and_tasks(self):
+        # 404 only means no salary is set up for him yet; it is not a refusal.
+        self.assertIn(self.client.get("/api/v1/payroll/me/").status_code, (200, 404))
+        self.assertEqual(self.client.get("/api/v1/tasks/?mine=true").status_code, 200)
+
+
 class AccessApiTests(TenantTestMixin, APITestCase):
     def setUp(self):
         super().setUp()
