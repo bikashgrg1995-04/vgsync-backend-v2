@@ -217,6 +217,30 @@ class Sale(models.Model):
     # done is a ``FreeService``; what is left is this minus those.
     free_services = models.PositiveSmallIntegerField(default=0)
 
+    # Maintenance sales only. ``paid``: an ordinary service. ``free``: one of
+    # the free services of a bike sold earlier (``free_service_for``), logged
+    # on that sale when this one is confirmed. ``accident``: a repair whose
+    # total is not known at the start, so an advance is taken first and the
+    # papers are checked (see ``SaleDocument``).
+    class ServiceKind(models.TextChoices):
+        PAID = "paid", "Normal service"
+        FREE = "free", "Free service"
+        ACCIDENT = "accident", "Accident case"
+
+    service_kind = models.CharField(
+        max_length=10, choices=ServiceKind.choices, default=ServiceKind.PAID
+    )
+    free_service_for = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="free_service_jobs",
+    )
+    odometer_km = models.PositiveIntegerField(null=True, blank=True)
+    # The owner went ahead although the accident papers were not all verified.
+    documents_ignored = models.BooleanField(default=False)
+
     # When the customer promised to pay what is left (a credit sale).
     due_date = models.DateField(null=True, blank=True)
 
@@ -401,7 +425,9 @@ class SaleItem(models.Model):
                 name="sale_item_quantity_positive",
             ),
             models.CheckConstraint(
-                condition=Q(unit_price__gt=0) & Q(line_total__gt=0),
+                # Zero only on a free service or an accident draft; the sale
+                # rules in ``services`` refuse it anywhere else.
+                condition=Q(unit_price__gte=0) & Q(line_total__gte=0),
                 name="sale_item_amounts_positive",
             ),
         ]
@@ -918,6 +944,14 @@ class FreeService(models.Model):
     performance = models.TextField(blank=True)
     work_done = models.TextField(blank=True)
     technician = models.CharField(max_length=120, blank=True)
+    # Set when it came from a free-service sale (a job card).
+    service_sale = models.ForeignKey(
+        Sale,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="free_service_logged",
+    )
     recorded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -937,3 +971,44 @@ class FreeService(models.Model):
 
     def __str__(self):
         return f"Free service {self.number} of sale {self.sale_id}"
+
+
+class SaleDocument(models.Model):
+    """A paper kept with a sale (an accident case: police report, insurance, ...)."""
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.PROTECT,
+        related_name="sale_documents",
+    )
+    sale = models.ForeignKey(
+        Sale, on_delete=models.CASCADE, related_name="documents"
+    )
+    title = models.CharField(max_length=150)
+    category = models.CharField(max_length=40, blank=True)
+    file = models.FileField(upload_to="sale_documents/%Y/%m/")
+    original_name = models.CharField(max_length=255, blank=True)
+    size = models.PositiveIntegerField(default=0)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    verified = models.BooleanField(default=False)
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return self.title

@@ -5,6 +5,7 @@ permission. Writes need full access to the business.
 
 from decimal import Decimal
 
+from django.db import transaction
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import (
@@ -37,6 +38,7 @@ from .models import (
     Followup,
     FreeService,
     Sale,
+    SaleDocument,
     SaleCreditSettlement,
     SaleCreditSettlementItem,
     SaleItem,
@@ -53,6 +55,8 @@ from .returns import (
 )
 from .serializers import (
     BikeUnitSerializer,
+    SaleDocumentSerializer,
+    SaleDocumentUploadSerializer,
     FreeServiceCountSerializer,
     FreeServiceSerializer,
     FreeServiceWriteSerializer,
@@ -378,6 +382,7 @@ class SaleViewSet(SalesBaseViewSet):
             .prefetch_related(
                 Prefetch("items", queryset=items),
                 "payments",
+                "documents",
                 Prefetch(
                     "free_service_records",
                     queryset=FreeService.objects.select_related("recorded_by"),
@@ -422,6 +427,27 @@ class SaleViewSet(SalesBaseViewSet):
 
         data = dict(serializer.validated_data)
         data.setdefault("sale_date", timezone.localdate())
+        advance = data.pop("advance_amount", None)
+        method = data.pop("advance_method", None)
+        accident = data.get("service_kind") == Sale.ServiceKind.ACCIDENT
+
+        if accident and data.get("sale_type") != Sale.SaleType.MAINTENANCE:
+            raise ValidationError(
+                {"service_kind": "An accident case is a maintenance sale."}
+            )
+
+        if accident and (advance is None or method is None):
+            raise ValidationError({
+                "advance_amount": (
+                    "An accident case starts with an advance: give the "
+                    "amount and how it was paid."
+                )
+            })
+
+        if not accident and (advance is not None or method is not None):
+            raise ValidationError(
+                {"advance_amount": "An advance at opening is for accident cases."}
+            )
 
         if (
             data.get("sale_type") == Sale.SaleType.BIKE
@@ -429,9 +455,20 @@ class SaleViewSet(SalesBaseViewSet):
         ):
             self.need_bike("create")
 
-        sale = create_sale(
-            business=request.active_business, user=request.user, **data
-        )
+        with transaction.atomic():
+            sale = create_sale(
+                business=request.active_business, user=request.user, **data
+            )
+
+            if accident:
+                create_payment(
+                    sale=sale,
+                    user=request.user,
+                    amount=advance,
+                    paid_on=sale.sale_date,
+                    method=method,
+                    notes="Advance",
+                )
 
         return self._respond(sale, status.HTTP_201_CREATED)
 
@@ -449,7 +486,14 @@ class SaleViewSet(SalesBaseViewSet):
         )
         serializer.is_valid(raise_exception=True)
 
-        sale = update_sale(sale=sale, **serializer.validated_data)
+        data = dict(serializer.validated_data)
+
+        if "advance_amount" in data or "advance_method" in data:
+            raise ValidationError(
+                {"advance_amount": "Take the advance as a payment on the sale."}
+            )
+
+        sale = update_sale(sale=sale, **data)
 
         return self._respond(sale)
 
@@ -462,6 +506,89 @@ class SaleViewSet(SalesBaseViewSet):
         self.need_bike("update" if write else "view")
 
         return sale
+
+    @action(detail=True, methods=["get", "post"], url_path="documents")
+    def documents(self, request, pk=None):
+        """GET the papers kept with a sale; POST (multipart) adds one."""
+        sale = self.get_object()
+
+        if sale.sale_type == Sale.SaleType.BIKE:
+            self.need_bike("view" if request.method == "GET" else "update")
+
+        if request.method == "GET":
+            rows = sale.documents.select_related("uploaded_by", "verified_by")
+
+            return Response(SaleDocumentSerializer(rows, many=True).data)
+
+        if sale.status == Sale.Status.CANCELLED:
+            raise ValidationError("A cancelled sale cannot take papers.")
+
+        serializer = SaleDocumentUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        upload = serializer.validated_data["file"]
+        document = SaleDocument.objects.create(
+            business=sale.business,
+            sale=sale,
+            title=(serializer.validated_data.get("title") or "").strip()
+            or upload.name.rsplit(".", 1)[0][:150],
+            category=serializer.validated_data["category"],
+            file=upload,
+            original_name=upload.name[:255],
+            size=upload.size,
+            uploaded_by=request.user,
+        )
+
+        return Response(
+            SaleDocumentSerializer(document).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(
+        detail=True,
+        methods=["get", "delete"],
+        url_path=r"documents/(?P<document_id>\d+)",
+    )
+    def document(self, request, pk=None, document_id=None):
+        """GET downloads a paper; DELETE removes it while the sale is a draft."""
+        from django.http import FileResponse
+        from django.shortcuts import get_object_or_404
+
+        sale = self.get_object()
+        document = get_object_or_404(sale.documents, pk=document_id)
+
+        if request.method == "DELETE":
+            if sale.status != Sale.Status.DRAFT:
+                raise ValidationError("Papers of a billed sale cannot be removed.")
+
+            document.file.delete(save=False)
+            document.delete()
+
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        return FileResponse(
+            document.file.open("rb"),
+            as_attachment=True,
+            filename=document.original_name,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"documents/(?P<document_id>\d+)/verify",
+    )
+    def verify_document(self, request, pk=None, document_id=None):
+        """Mark a paper checked (or ``{"verified": false}`` to undo)."""
+        from django.shortcuts import get_object_or_404
+
+        sale = self.get_object()
+        document = get_object_or_404(sale.documents, pk=document_id)
+        verified = request.data.get("verified", True) not in (False, "false", "0", 0)
+
+        document.verified = verified
+        document.verified_by = request.user if verified else None
+        document.verified_at = timezone.now() if verified else None
+        document.save(update_fields=["verified", "verified_by", "verified_at"])
+
+        return Response(SaleDocumentSerializer(document).data)
 
     @action(detail=True, methods=["get", "post"], url_path="free-services")
     def free_services(self, request, pk=None):
@@ -516,7 +643,11 @@ class SaleViewSet(SalesBaseViewSet):
         if sale.sale_type == Sale.SaleType.BIKE:
             self.need_bike("update")
 
-        sale = confirm_sale(sale=sale, user=request.user)
+        sale = confirm_sale(
+            sale=sale,
+            user=request.user,
+            ignore_documents=bool(request.data.get("ignore_documents")),
+        )
 
         if sale.payment_mode == Sale.PaymentMode.EMI:
             # An instalment due within days is flagged at once.

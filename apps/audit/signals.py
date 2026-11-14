@@ -45,6 +45,7 @@ TRACKED = {
     "sales.Sale": True,
     "sales.SalePayment": True,
     "sales.FreeService": True,
+    "sales.SaleDocument": True,
     "sales.SaleReturn": True,
     "sales.SaleCreditSettlement": True,
     "finance.Expense": True,

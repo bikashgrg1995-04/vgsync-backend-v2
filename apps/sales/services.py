@@ -86,7 +86,7 @@ def _price(price, product):
     return money(price) if price is not None else None
 
 
-def _resolve_items(business, sale_type, items):
+def _resolve_items(business, sale_type, items, kind="paid"):
     """
     Turn the lines sent by the client into lines ready to store, checking
     them against the kind of sale:
@@ -98,6 +98,14 @@ def _resolve_items(business, sale_type, items):
     """
     resolved = []
     seen_units = set()
+    # A free service is mostly no charge; an accident repair is priced later.
+    zero_ok = sale_type == Sale.SaleType.MAINTENANCE and kind in (
+        Sale.ServiceKind.FREE,
+        Sale.ServiceKind.ACCIDENT,
+    )
+
+    if not items and kind != Sale.ServiceKind.ACCIDENT:
+        raise serializers.ValidationError({"items": "Add at least one item."})
 
     for entry in items:
         product = entry.get("product")
@@ -176,7 +184,7 @@ def _resolve_items(business, sale_type, items):
 
         price = _price(entry.get("unit_price"), product or local)
 
-        if price is None or price <= 0:
+        if price is None or price < 0 or (price == 0 and not zero_ok):
             what = (
                 product.name if product else (description or "This line")
             )
@@ -359,6 +367,74 @@ def _header_fields(totals):
     return {k: v for k, v in totals.items() if k != "line_totals"}
 
 
+def _check_service_kind(sale):
+    """Rules of the maintenance sub-types (normal, free, accident)."""
+    kind = sale.service_kind
+    field = {"service_kind": "This is for maintenance sales."}
+
+    if sale.sale_type != Sale.SaleType.MAINTENANCE:
+        if kind != Sale.ServiceKind.PAID:
+            raise serializers.ValidationError(field)
+
+        if sale.free_service_for_id or sale.odometer_km is not None:
+            raise serializers.ValidationError(
+                {"odometer_km": "The bike's km and free service are for maintenance."}
+            )
+
+        return
+
+    if kind != Sale.ServiceKind.FREE:
+        if sale.free_service_for_id:
+            raise serializers.ValidationError({
+                "free_service_for": "Only a free service is linked to a bike sale."
+            })
+
+        return
+
+    original = sale.free_service_for
+
+    if original is None:
+        raise serializers.ValidationError({
+            "free_service_for": "Choose the bike sale this free service belongs to."
+        })
+
+    if (
+        original.business_id != sale.business_id
+        or original.sale_type != Sale.SaleType.BIKE
+        or original.status != Sale.Status.CONFIRMED
+    ):
+        raise serializers.ValidationError({
+            "free_service_for": "Choose a confirmed bike sale of this business."
+        })
+
+    if sale.odometer_km is None:
+        raise serializers.ValidationError(
+            {"odometer_km": "Give the km the bike has run."}
+        )
+
+    done = original.free_service_records.count()
+
+    if done >= original.free_services:
+        raise serializers.ValidationError({
+            "free_service_for": (
+                "All free services of that sale are already done."
+                if original.free_services
+                else "That sale has no free services included."
+            )
+        })
+
+    # The job is for the same customer and bike as the sale.
+    if sale.customer_id is None and not sale.walk_in_name:
+        sale.customer_id = original.customer_id
+        sale.walk_in_name = original.walk_in_name
+
+    if not (sale.vehicle_chassis_no or sale.vehicle_reg_no):
+        unit_item = original.items.select_related("bike_unit").first()
+
+        if unit_item and unit_item.bike_unit_id:
+            sale.vehicle_chassis_no = unit_item.bike_unit.chassis_no
+
+
 def _check_free_services(sale):
     if sale.free_services and sale.sale_type != Sale.SaleType.BIKE:
         raise serializers.ValidationError(
@@ -379,7 +455,8 @@ def create_sale(*, business, user, items, **header):
     )
 
     _check_free_services(sale)
-    items = _resolve_items(business, sale.sale_type, items)
+    _check_service_kind(sale)
+    items = _resolve_items(business, sale.sale_type, items, sale.service_kind)
 
     totals = calculate_totals(
         [(i["quantity"], i["unit_price"]) for i in items], discount, vat_rate
@@ -427,11 +504,14 @@ def update_sale(*, sale, items=None, **header):
         setattr(sale, field, value)
 
     _check_free_services(sale)
+    _check_service_kind(sale)
 
     if items is None:
         lines = [(i.quantity, i.unit_price) for i in sale.items.all()]
     else:
-        items = _resolve_items(sale.business, sale.sale_type, items)
+        items = _resolve_items(
+            sale.business, sale.sale_type, items, sale.service_kind
+        )
         lines = [(i["quantity"], i["unit_price"]) for i in items]
 
     totals = calculate_totals(lines, sale.discount_amount, sale.vat_rate)
@@ -442,7 +522,9 @@ def update_sale(*, sale, items=None, **header):
     sale.finance_charge = _check_terms(sale, totals["net_total"])
     paid = settled_total(sale)
 
-    if sale.amount_due < paid:
+    provisional = sale.service_kind == Sale.ServiceKind.ACCIDENT and sale.amount_due == 0
+
+    if sale.amount_due < paid and not provisional:
         raise serializers.ValidationError({
             "items": (
                 f"The new total is less than the {paid} already received or "
@@ -499,7 +581,7 @@ def next_invoice_number(business):
 
 
 @transaction.atomic
-def confirm_sale(*, sale, user):
+def confirm_sale(*, sale, user, ignore_documents=False):
     """
     Hand over the goods: take every stock line out of the business's stock,
     mark sold bikes, give the sale its invoice number and lock it. Stock
@@ -527,6 +609,32 @@ def confirm_sale(*, sale, user):
         raise serializers.ValidationError({"items": "The sale has no lines."})
 
     paid = paid_total(sale)
+
+    if sale.service_kind == Sale.ServiceKind.ACCIDENT:
+        if sale.amount_due <= 0:
+            raise serializers.ValidationError({
+                "items": "Enter the final price of the repair before billing."
+            })
+
+        if paid > sale.amount_due:
+            raise Conflict(
+                f"The advance ({paid}) is more than the final total "
+                f"({sale.amount_due}). Raise the total or void a payment.",
+                code="advance_exceeds_total",
+            )
+
+        documents = list(sale.documents.all())
+
+        if not documents or not all(d.verified for d in documents):
+            if not ignore_documents:
+                raise Conflict(
+                    "The accident papers are not all uploaded and verified."
+                    if not documents
+                    else "Some accident papers are not verified yet.",
+                    code="documents_unverified",
+                )
+
+            sale.documents_ignored = True
     emi = sale.payment_mode == Sale.PaymentMode.EMI
 
     # Without a customer there is nobody to collect the rest from.
@@ -590,10 +698,31 @@ def confirm_sale(*, sale, user):
     sale.confirmed_at = timezone.now()
     sale.save()
 
+    if sale.service_kind == Sale.ServiceKind.FREE:
+        _log_free_job(sale, user)
+
     _create_followups(sale)
     sync_followups(sale)
 
     return sale
+
+
+def _log_free_job(sale, user):
+    """Write the job into the free-service record of the bike sale."""
+    work = "; ".join(
+        i.description or (i.product.name if i.product_id else "")
+        for i in sale.items.select_related("product")
+    )
+    record = add_free_service(
+        sale=sale.free_service_for,
+        user=user,
+        odometer_km=sale.odometer_km,
+        service_date=sale.sale_date,
+        performance="",
+        work_done=work[:2000],
+    )
+    record.service_sale = sale
+    record.save(update_fields=["service_sale"])
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +923,14 @@ def create_payment(*, sale, user, amount, paid_on, method,
     settled = settled_total(sale)
     amount = money(amount)
 
-    if settled + amount > sale.amount_due:
+    # An accident repair has no final total yet, so its advance is not held
+    # to the provisional amount; the final bill is checked at confirm.
+    advance_first = (
+        sale.service_kind == Sale.ServiceKind.ACCIDENT
+        and sale.status == Sale.Status.DRAFT
+    )
+
+    if not advance_first and settled + amount > sale.amount_due:
         raise serializers.ValidationError({
             "amount": (
                 f"This is more than is still due ({sale.amount_due - settled})."

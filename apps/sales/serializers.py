@@ -13,6 +13,7 @@ from .models import (
     Followup,
     FreeService,
     Sale,
+    SaleDocument,
     SaleCreditSettlement,
     SaleCreditSettlementItem,
     SaleItem,
@@ -186,9 +187,13 @@ class SaleItemInputSerializer(serializers.Serializer):
     )
     quantity = serializers.DecimalField(**QUANTITY, required=False)
     unit_price = serializers.DecimalField(
-        **POSITIVE,
+        **MONEY,
+        min_value=Decimal("0"),
         required=False,
-        help_text="Leave out to use the product's sale price.",
+        help_text=(
+            "Leave out to use the product's sale price. 0 is only accepted "
+            "on a free service or an accident case."
+        ),
     )
 
 
@@ -260,7 +265,26 @@ class SaleWriteSerializer(serializers.Serializer):
         min_value=0, max_value=20, required=False,
         help_text="Bike sales: how many free services come with the bike.",
     )
-    items = SaleItemInputSerializer(many=True, allow_empty=False, max_length=200)
+    # Maintenance: normal, free (of a bike sold earlier) or accident case.
+    service_kind = serializers.ChoiceField(
+        choices=Sale.ServiceKind.choices, required=False
+    )
+    free_service_for = serializers.PrimaryKeyRelatedField(
+        queryset=Sale.objects.none(), required=False, allow_null=True
+    )
+    odometer_km = serializers.IntegerField(
+        min_value=0, max_value=9_999_999, required=False, allow_null=True
+    )
+    # Accident case, when it is opened: the advance taken now.
+    advance_amount = serializers.DecimalField(
+        **MONEY, min_value=Decimal("0.01"), required=False
+    )
+    advance_method = serializers.ChoiceField(
+        choices=SalePayment.Method.choices, required=False
+    )
+    items = SaleItemInputSerializer(
+        many=True, allow_empty=True, max_length=200, required=False, default=list
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -270,6 +294,9 @@ class SaleWriteSerializer(serializers.Serializer):
         if request is not None:
             self.fields["customer"].queryset = Customer.objects.filter(
                 business=request.active_business, is_active=True
+            )
+            self.fields["free_service_for"].queryset = Sale.objects.filter(
+                business=request.active_business, sale_type=Sale.SaleType.BIKE
             )
             self.fields["customer"].error_messages["does_not_exist"] = (
                 "Choose an active customer of this business."
@@ -286,7 +313,7 @@ class SalePatchSerializer(SaleWriteSerializer):
     """Editing a draft: every field is optional."""
 
     items = SaleItemInputSerializer(
-        many=True, allow_empty=False, max_length=200, required=False
+        many=True, allow_empty=True, max_length=200, required=False
     )
 
 
@@ -404,6 +431,11 @@ class SaleSerializer(serializers.ModelSerializer):
     payment_status = serializers.SerializerMethodField()
     free_services_used = serializers.SerializerMethodField()
     free_services_left = serializers.SerializerMethodField()
+    free_service_for_no = serializers.CharField(
+        source="free_service_for.sale_no", default=None, read_only=True
+    )
+    documents_total = serializers.SerializerMethodField()
+    documents_verified = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -435,6 +467,13 @@ class SaleSerializer(serializers.ModelSerializer):
             "free_services",
             "free_services_used",
             "free_services_left",
+            "service_kind",
+            "free_service_for",
+            "free_service_for_no",
+            "odometer_km",
+            "documents_ignored",
+            "documents_total",
+            "documents_verified",
             "amount_due",
             "due_date",
             "vehicle_chassis_no",
@@ -494,6 +533,12 @@ class SaleSerializer(serializers.ModelSerializer):
     def get_payment_status(self, obj):
         return payment_status(obj.amount_due, self._settled(obj))
 
+    def get_documents_total(self, obj):
+        return len(obj.documents.all())
+
+    def get_documents_verified(self, obj):
+        return sum(1 for d in obj.documents.all() if d.verified)
+
     def get_free_services_used(self, obj):
         return len(obj.free_service_records.all())
 
@@ -523,6 +568,7 @@ class FreeServiceSerializer(serializers.ModelSerializer):
             "performance",
             "work_done",
             "technician",
+            "service_sale",
             "recorded_by_name",
             "created_at",
         )
@@ -531,6 +577,74 @@ class FreeServiceSerializer(serializers.ModelSerializer):
         user = obj.recorded_by
 
         return (user.get_full_name() or user.username) if user else ""
+
+
+class SaleDocumentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+    verified_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SaleDocument
+        fields = (
+            "id",
+            "title",
+            "category",
+            "original_name",
+            "size",
+            "uploaded_by_name",
+            "created_at",
+            "verified",
+            "verified_by_name",
+            "verified_at",
+        )
+
+    @staticmethod
+    def _name(user):
+        return (user.get_full_name() or user.username) if user else ""
+
+    def get_uploaded_by_name(self, obj):
+        return self._name(obj.uploaded_by)
+
+    def get_verified_by_name(self, obj):
+        return self._name(obj.verified_by)
+
+
+class SaleDocumentUploadSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    category = serializers.ChoiceField(
+        choices=[
+            ("police_report", "Police report"),
+            ("insurance", "Insurance"),
+            ("license", "Driving licence"),
+            ("bluebook", "Blue book"),
+            ("photo", "Photo of damage"),
+            ("other", "Other"),
+        ],
+        required=False,
+        default="other",
+    )
+    file = serializers.FileField()
+
+    def validate_file(self, upload):
+        from apps.accounts.manage_serializers import (
+            DOCUMENT_MAX_BYTES,
+            DOCUMENT_TYPES,
+        )
+
+        extension = upload.name.rsplit(".", 1)[-1].lower() if "." in upload.name else ""
+
+        if extension not in DOCUMENT_TYPES:
+            raise serializers.ValidationError(
+                "Upload a PDF, image, Word, Excel or text file."
+            )
+
+        if upload.size > DOCUMENT_MAX_BYTES:
+            raise serializers.ValidationError("The file must be 10 MB or smaller.")
+
+        if upload.size == 0:
+            raise serializers.ValidationError("The file is empty.")
+
+        return upload
 
 
 class FreeServiceWriteSerializer(serializers.Serializer):
