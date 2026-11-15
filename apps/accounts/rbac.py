@@ -60,6 +60,7 @@ CATALOG = {
         "approve": "Approve exceptional sales",
         "collect": "Record customer and company payments",
         "view_all": "See everyone's sales, not only your own",
+        "followup": "Work follow-ups: record calls and visits, skip them",
     },
     "bike_sales": {
         "view": "View bike sales",
@@ -318,6 +319,41 @@ PRESETS = {
     },
     # A mechanic. Sees stock and prices to check parts, but nothing else of
     # the business. His own tasks, pay and profile need no permission.
+    # Keeps the stock room: receives goods, counts, adjusts and moves stock.
+    # No cost prices on products unless the owner ticks "See purchase and
+    # cost prices"; no selling.
+    "store_keeper": {
+        "label": "Store Keeper",
+        "department": "Inventory",
+        "grants": {
+            "inventory": ["view", "create", "adjust", "transfer"],
+            "purchases": ["view", "receive"],
+            "reminders": ["view"],
+        },
+    },
+    # Calls customers about service, EMI and credit. Sees every customer's
+    # follow-ups but edits no sale and takes no money.
+    "telecaller": {
+        "label": "Follow-up / Telecaller",
+        "department": "Sales",
+        "grants": {
+            "sales": ["view", "view_all", "followup"],
+            "bike_sales": ["view"],
+            "reminders": ["view"],
+        },
+    },
+    # Looks after instalments and the financer's payments: sees bike sales
+    # and EMI schedules, records the money, chases what is due.
+    "emi_officer": {
+        "label": "EMI / Finance Officer",
+        "department": "Finance",
+        "grants": {
+            "sales": ["view", "view_all", "collect", "followup"],
+            "bike_sales": ["view"],
+            "reports": ["view"],
+            "reminders": ["view"],
+        },
+    },
     "technician": {
         "label": "Technician",
         "department": "Workshop",

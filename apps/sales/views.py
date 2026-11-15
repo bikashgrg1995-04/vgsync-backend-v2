@@ -126,6 +126,10 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
         "job_lines": "view",
         "job_line_approve": "update",
         "job_line_reject": "update",
+        # Calls and visits are their own right, so a telecaller needs no
+        # right to edit sales.
+        "done": "followup",
+        "skip": "followup",
     }
 
     # Bike sales and their instalments belong to the owner and to staff who
@@ -1106,7 +1110,7 @@ class FollowupViewSet(SalesBaseViewSet):
         target = self.get_object()
 
         if target.kind in BIKE_FOLLOWUP_KINDS:
-            self.need_bike("update")
+            self.need_bike("view")
 
         followup = complete_followup(
             followup=target,
@@ -1126,7 +1130,7 @@ class FollowupViewSet(SalesBaseViewSet):
         target = self.get_object()
 
         if target.kind in BIKE_FOLLOWUP_KINDS:
-            self.need_bike("update")
+            self.need_bike("view")
 
         followup = skip_followup(
             followup=target,

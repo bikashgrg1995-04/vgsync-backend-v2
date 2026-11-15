@@ -75,6 +75,9 @@ class TenantTestMixin:
             elif "view" in flags and module == "inventory":
                 extra = ["view_cost"]
 
+            if module == "sales" and ("create" in flags or "update" in flags):
+                extra = extra + ["followup"]
+
             PositionPermission.objects.create(
                 position=position,
                 module=module,
