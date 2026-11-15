@@ -39,6 +39,7 @@ from .models import (
     Customer,
     Followup,
     FreeService,
+    JobLine,
     Sale,
     SaleDocument,
     SaleCreditSettlement,
@@ -58,6 +59,10 @@ from .returns import (
 from .serializers import (
     BikeUnitSerializer,
     JobAssignSerializer,
+    JobLineApproveSerializer,
+    JobLineOfficeSerializer,
+    JobLineRejectSerializer,
+    JobLineWriteSerializer,
     JobDoneSerializer,
     MyJobSerializer,
     SaleDocumentSerializer,
@@ -82,6 +87,10 @@ from .serializers import (
     SaleWriteSerializer,
 )
 from .services import (
+    approve_job_line,
+    reject_job_line,
+    request_job_line,
+    withdraw_job_line,
     assign_technician,
     finish_job,
     start_job,
@@ -114,6 +123,9 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
         "assign_technician": "update",
         "job_start": "update",
         "job_done": "update",
+        "job_lines": "view",
+        "job_line_approve": "update",
+        "job_line_reject": "update",
     }
 
     # Bike sales and their instalments belong to the owner and to staff who
@@ -619,6 +631,52 @@ class SaleViewSet(SalesBaseViewSet):
         )
 
         return self._respond(sale)
+
+    @action(detail=True, methods=["get"], url_path="job-lines")
+    def job_lines(self, request, pk=None):
+        sale = self.get_object()
+        lines = sale.job_lines.select_related("product", "requested_by").exclude(
+            status=JobLine.Status.WITHDRAWN
+        )
+
+        return Response(JobLineOfficeSerializer(lines, many=True).data)
+
+    def _job_line(self, sale, line_id):
+        from django.shortcuts import get_object_or_404
+
+        return get_object_or_404(sale.job_lines, pk=line_id)
+
+    @action(
+        detail=True, methods=["post"],
+        url_path=r"job-lines/(?P<line_id>[0-9]+)/approve",
+    )
+    def job_line_approve(self, request, pk=None, line_id=None):
+        sale = self.get_object()
+        serializer = JobLineApproveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        line = approve_job_line(
+            line=self._job_line(sale, line_id),
+            by=request.user,
+            unit_price=serializer.validated_data.get("unit_price"),
+        )
+
+        return Response(JobLineOfficeSerializer(line).data)
+
+    @action(
+        detail=True, methods=["post"],
+        url_path=r"job-lines/(?P<line_id>[0-9]+)/reject",
+    )
+    def job_line_reject(self, request, pk=None, line_id=None):
+        sale = self.get_object()
+        serializer = JobLineRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        line = reject_job_line(
+            line=self._job_line(sale, line_id),
+            by=request.user,
+            reason=serializer.validated_data["reason"],
+        )
+
+        return Response(JobLineOfficeSerializer(line).data)
 
     @action(detail=True, methods=["post"], url_path="job-start")
     def job_start(self, request, pk=None):
@@ -1301,7 +1359,7 @@ class MyJobsViewSet(viewsets.ViewSet):
             )
             .exclude(status=Sale.Status.CANCELLED)
             .select_related("customer", "free_service_for")
-            .prefetch_related("items__product")
+            .prefetch_related("items__product", "job_lines__product", "job_lines__requested_by")
         )
 
     def list(self, request):
@@ -1325,6 +1383,43 @@ class MyJobsViewSet(viewsets.ViewSet):
         sale = start_job(sale=self._own(request, pk), user=request.user)
 
         return Response(MyJobSerializer(self._own(request, sale.pk)).data)
+
+    @action(detail=True, methods=["post"])
+    def lines(self, request, pk=None):
+        """Ask for a part or list work to charge for."""
+        from apps.inventory.models import Product
+
+        serializer = JobLineWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        product = None
+
+        if data.get("product"):
+            product = Product.objects.filter(pk=data["product"]).first()
+
+            if product is None:
+                raise ValidationError({"product": "Choose a part from the stock list."})
+
+        request_job_line(
+            sale=self._own(request, pk),
+            user=request.user,
+            kind=data["kind"],
+            product=product,
+            description=data.get("description", ""),
+            quantity=data["quantity"],
+            note=data.get("note", ""),
+        )
+
+        return Response(MyJobSerializer(self._own(request, pk)).data, status=201)
+
+    @action(detail=True, methods=["delete"], url_path=r"lines/(?P<line_id>[0-9]+)")
+    def withdraw_line(self, request, pk=None, line_id=None):
+        from django.shortcuts import get_object_or_404
+
+        sale = self._own(request, pk)
+        withdraw_job_line(line=get_object_or_404(sale.job_lines, pk=line_id), user=request.user)
+
+        return Response(MyJobSerializer(self._own(request, pk)).data)
 
     @action(detail=True, methods=["post"])
     def done(self, request, pk=None):

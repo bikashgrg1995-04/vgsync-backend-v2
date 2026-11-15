@@ -2,6 +2,8 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from apps.accounts import rbac
+
 from apps.inventory.models import (
     Product,
     StockBalance,
@@ -15,7 +17,24 @@ from apps.inventory.services.stock import validate_quantity
 # PRODUCT
 # ==================================================
 
-class ProductSerializer(serializers.ModelSerializer):
+class CostHiddenMixin:
+    """Leave out the purchase price for someone without ``inventory.view_cost``."""
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+
+        if request is not None and not rbac.has_permission(
+            request.user,
+            "inventory.view_cost",
+            getattr(request, "access_mode", "full"),
+        ):
+            data.pop("purchase_price", None)
+
+        return data
+
+
+class ProductSerializer(CostHiddenMixin, serializers.ModelSerializer):
     owner_business_id = serializers.IntegerField(read_only=True)
 
     class Meta:
@@ -120,7 +139,7 @@ class StockBalanceSerializer(serializers.ModelSerializer):
 # BUSINESS STOCK CATALOG RESPONSE
 # ==================================================
 
-class BusinessStockSerializer(serializers.ModelSerializer):
+class BusinessStockSerializer(CostHiddenMixin, serializers.ModelSerializer):
     """
     Shows all active catalog products with stock belonging
     to the current business, including zero-stock products.

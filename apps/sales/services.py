@@ -31,6 +31,7 @@ from .models import (
     EmiInstallment,
     Followup,
     FreeService,
+    JobLine,
     Sale,
     SaleCreditSettlement,
     SaleItem,
@@ -1450,3 +1451,162 @@ def _sync_free_record(sale):
         record.performance = sale.job_notes[:2000]
 
     record.save(update_fields=["technician", "performance"])
+
+
+# ---------------------------------------------------------------------------
+# Parts and work asked for by the technician
+# ---------------------------------------------------------------------------
+
+def _line_label(line):
+    return line.product.name if line.product_id else line.description
+
+
+def _notify_office(sale, title, body):
+    """Tell whoever opened the job (never the technician himself)."""
+    from apps.notifications.models import Notification
+    from apps.notifications.services import notify
+
+    person = sale.salesperson or sale.created_by
+
+    if person is not None and person != sale.technician:
+        notify(
+            sale.business, person, Notification.Kind.JOB_LINE_REQUESTED,
+            title, body, link=f"/dashboard/sales/detail/?id={sale.pk}",
+        )
+
+
+@transaction.atomic
+def request_job_line(*, sale, user, kind, product=None, description="",
+                     quantity=Decimal("1"), note=""):
+    """The technician of a job asks for a part or lists work to charge for."""
+    sale = _job_sale(sale)
+
+    if sale.technician_id != user.pk:
+        raise serializers.ValidationError("This job is not yours.")
+
+    if sale.status != Sale.Status.DRAFT:
+        raise Conflict(
+            "This job is already billed; ask the office to add it.",
+            code="document_not_editable",
+        )
+
+    description = (description or "").strip()
+
+    if quantity is None or Decimal(quantity) <= 0:
+        raise serializers.ValidationError({"quantity": "Must be more than zero."})
+
+    if kind == JobLine.Kind.PART:
+        if product is None or description:
+            raise serializers.ValidationError({"product": "Choose the part."})
+
+        if not product.is_active:
+            raise serializers.ValidationError({"product": "This part is not in use."})
+    else:
+        if product is not None or not description:
+            raise serializers.ValidationError({"description": "Say what work was done."})
+
+    line = JobLine.objects.create(
+        sale=sale, kind=kind, product=product, description=description,
+        quantity=quantity, note=(note or "").strip()[:300], requested_by=user,
+    )
+    _notify_office(
+        sale,
+        f"{sale.sale_no}: {kind} asked for",
+        f"{_technician_name(sale)} asked for {_line_label(line)}.",
+    )
+
+    return line
+
+
+@transaction.atomic
+def withdraw_job_line(*, line, user):
+    line = JobLine.objects.select_for_update(of=("self",)).select_related("sale").get(pk=line.pk)
+
+    if line.requested_by_id != user.pk:
+        raise serializers.ValidationError("This request is not yours.")
+
+    if line.status != JobLine.Status.REQUESTED:
+        raise Conflict("Only a request not yet decided can be withdrawn.", code="invalid_status")
+
+    line.status = JobLine.Status.WITHDRAWN
+    line.save(update_fields=["status"])
+
+    return line
+
+
+def _tell_technician(line, title, body):
+    from apps.notifications.models import Notification
+    from apps.notifications.services import notify
+
+    if line.requested_by_id:
+        notify(
+            line.sale.business, line.requested_by, Notification.Kind.JOB_LINE_DECIDED,
+            title, body, link="/dashboard/my-jobs",
+        )
+
+
+@transaction.atomic
+def approve_job_line(*, line, by, unit_price=None):
+    """Put the asked-for part or work on the sale at a price."""
+    line = JobLine.objects.select_for_update(of=("self",)).select_related("sale", "product").get(pk=line.pk)
+
+    if line.status != JobLine.Status.REQUESTED:
+        raise Conflict("This request is already decided.", code="invalid_status")
+
+    sale = _lock_draft(line.sale)
+    price = unit_price
+
+    if price is None and line.product_id:
+        price = line.product.sale_price
+
+    if price is None:
+        raise serializers.ValidationError({"unit_price": "Enter the price to charge."})
+
+    existing = [
+        {
+            "product": i.product,
+            "local_product": i.local_product,
+            "bike_unit": None,
+            "description": "" if i.local_product_id else i.description,
+            "quantity": i.quantity,
+            "unit_price": i.unit_price,
+        }
+        for i in sale.items.all()
+    ]
+    existing.append({
+        "product": line.product,
+        "description": line.description,
+        "quantity": line.quantity,
+        "unit_price": price,
+    })
+
+    update_sale(sale=sale, items=existing)
+
+    line.status = JobLine.Status.APPROVED
+    line.unit_price = money(price)
+    line.decided_by = by
+    line.decided_at = timezone.now()
+    line.save(update_fields=["status", "unit_price", "decided_by", "decided_at"])
+    _tell_technician(line, f"{sale.sale_no}: added", f"{_line_label(line)} was added to the job.")
+
+    return line
+
+
+@transaction.atomic
+def reject_job_line(*, line, by, reason):
+    line = JobLine.objects.select_for_update(of=("self",)).select_related("sale", "product").get(pk=line.pk)
+
+    if line.status != JobLine.Status.REQUESTED:
+        raise Conflict("This request is already decided.", code="invalid_status")
+
+    line.status = JobLine.Status.REJECTED
+    line.reject_reason = reason[:300]
+    line.decided_by = by
+    line.decided_at = timezone.now()
+    line.save(update_fields=["status", "reject_reason", "decided_by", "decided_at"])
+    _tell_technician(
+        line, f"{line.sale.sale_no}: turned down",
+        f"{_line_label(line)}: {reason}"[:300],
+    )
+
+    return line

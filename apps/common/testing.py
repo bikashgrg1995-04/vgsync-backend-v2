@@ -68,7 +68,12 @@ class TenantTestMixin:
         for module, flags in modules.items():
             # Like the data migration: anyone who sees sales sees all of them.
             # Salesperson scoping is tested with real presets.
-            extra = ["view_all"] if module == "sales" and "view" in flags else []
+            extra = []
+
+            if "view" in flags and module == "sales":
+                extra = ["view_all"]
+            elif "view" in flags and module == "inventory":
+                extra = ["view_cost"]
 
             PositionPermission.objects.create(
                 position=position,

@@ -30,6 +30,7 @@ CATALOG = {
     "dashboard": {"view": "View dashboard"},
     "inventory": {
         "view": "View stock",
+        "view_cost": "See purchase and cost prices",
         "create": "Add products and stock",
         "update": "Edit products",
         "delete": "Delete products",
@@ -123,7 +124,7 @@ PAY_CODES = frozenset({"staff.pay_view", "staff.pay"})
 
 # Codes that only read. These are the only ones a read-only context keeps.
 READ_ACTIONS = frozenset(
-    {"view", "export", "pay_view", "view_audit", "view_all"}
+    {"view", "export", "pay_view", "view_audit", "view_all", "view_cost"}
 )
 
 # The four classic flags stored as columns on PositionPermission.
@@ -184,7 +185,12 @@ def _all(module):
 
 
 def _view(*modules):
-    return {module: ["view"] for module in modules}
+    # Whoever could see stock still sees what it cost, except where a
+    # preset says otherwise (the Technician).
+    return {
+        module: ["view", "view_cost"] if module == "inventory" else ["view"]
+        for module in modules
+    }
 
 
 PRESETS = {
@@ -207,7 +213,7 @@ PRESETS = {
         "department": "Management",
         "grants": {
             "dashboard": ["view"],
-            "inventory": ["view", "create", "update", "adjust", "transfer"],
+            "inventory": ["view", "view_cost", "create", "update", "adjust", "transfer"],
             "purchases": ["view", "create", "update", "receive", "return"],
             "sales": ["view", "view_all", "create", "update", "discount", "cancel"],
             "bike_sales": _all("bike_sales"),
@@ -231,7 +237,7 @@ PRESETS = {
             "sales": ["view", "view_all", "collect"],
             "bike_sales": ["view"],
             "purchases": ["view", "pay"],
-            "inventory": ["view"],
+            "inventory": ["view", "view_cost"],
             "staff": ["pay_view", "pay"],
             "reminders": ["view"],
         },
@@ -268,7 +274,7 @@ PRESETS = {
             "purchases": [
                 "view", "create", "update", "receive", "pay", "return",
             ],
-            "inventory": ["view", "create"],
+            "inventory": ["view", "view_cost", "create"],
             "reports": ["view"],
             "reminders": ["view"],
         },
@@ -286,7 +292,8 @@ PRESETS = {
         "department": "Inventory",
         "grants": {
             "inventory": [
-                "view", "create", "update", "adjust", "write_off", "transfer",
+                "view", "view_cost", "create", "update", "adjust", "write_off",
+                "transfer",
             ],
             **_view("purchases", "reminders"),
             "reports": ["view"],
@@ -296,7 +303,7 @@ PRESETS = {
         "label": "Inventory Staff",
         "department": "Inventory",
         "grants": {
-            "inventory": ["view", "create", "adjust"],
+            "inventory": ["view", "view_cost", "create", "adjust"],
             **_view("reminders"),
         },
     },
@@ -315,7 +322,7 @@ PRESETS = {
         "label": "Technician",
         "department": "Workshop",
         "grants": {
-            **_view("inventory"),
+            "inventory": ["view"],
         },
     },
     "hr_manager": {

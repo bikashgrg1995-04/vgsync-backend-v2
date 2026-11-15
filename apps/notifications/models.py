@@ -23,6 +23,8 @@ class Notification(models.Model):
         TASK_COMMENT = "task_comment", "Task comment"
         TASK_OVERDUE = "task_overdue", "Task overdue"
         JOB_ASSIGNED = "job_assigned", "Job assigned"
+        JOB_LINE_REQUESTED = "job_line_requested", "Part or work asked for"
+        JOB_LINE_DECIDED = "job_line_decided", "Part or work decided"
 
     business = models.ForeignKey(
         "businesses.Business",

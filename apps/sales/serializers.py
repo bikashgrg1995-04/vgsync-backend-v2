@@ -4,6 +4,8 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.inventory.serializers import CostHiddenMixin
+
 from apps.inventory.models import LocalProduct
 from apps.inventory.services.products import get_products_for_business
 
@@ -12,6 +14,7 @@ from .models import (
     Customer,
     Followup,
     FreeService,
+    JobLine,
     Sale,
     SaleDocument,
     SaleCreditSettlement,
@@ -731,6 +734,8 @@ class MyJobSerializer(serializers.ModelSerializer):
         source="free_service_for.sale_no", default=None, read_only=True
     )
     work = serializers.SerializerMethodField()
+    lines = serializers.SerializerMethodField()
+    can_add_lines = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -739,6 +744,8 @@ class MyJobSerializer(serializers.ModelSerializer):
             "sale_no",
             "sale_date",
             "service_kind",
+            "lines",
+            "can_add_lines",
             "free_service_for_no",
             "customer_name",
             "customer_phone",
@@ -760,6 +767,12 @@ class MyJobSerializer(serializers.ModelSerializer):
     def get_customer_phone(self, obj):
         return obj.customer.phone if obj.customer_id else ""
 
+    def get_lines(self, obj):
+        return JobLineSerializer(obj.job_lines.all(), many=True).data
+
+    def get_can_add_lines(self, obj):
+        return obj.status == Sale.Status.DRAFT
+
     def get_work(self, obj):
         return [
             {
@@ -768,6 +781,59 @@ class MyJobSerializer(serializers.ModelSerializer):
             }
             for i in obj.items.all()
         ]
+
+
+class JobLineSerializer(serializers.ModelSerializer):
+    """A part or work asked for. ``price`` shows only to the office."""
+
+    name = serializers.SerializerMethodField()
+    requested_by_name = serializers.SerializerMethodField()
+    unit = serializers.CharField(source="product.unit", default="", read_only=True)
+
+    class Meta:
+        model = JobLine
+        fields = (
+            "id", "kind", "product", "name", "unit", "description", "quantity",
+            "note", "status", "reject_reason", "requested_by_name", "created_at",
+        )
+
+    def get_name(self, obj):
+        return obj.product.name if obj.product_id else obj.description
+
+    def get_requested_by_name(self, obj):
+        user = obj.requested_by
+
+        return (user.get_full_name() or user.username) if user else ""
+
+
+class JobLineOfficeSerializer(JobLineSerializer):
+    default_price = serializers.DecimalField(
+        source="product.sale_price", max_digits=12, decimal_places=2,
+        default=None, read_only=True,
+    )
+
+    class Meta(JobLineSerializer.Meta):
+        fields = JobLineSerializer.Meta.fields + ("unit_price", "default_price")
+
+
+class JobLineWriteSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=JobLine.Kind.choices)
+    product = serializers.IntegerField(required=False, allow_null=True)
+    description = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    quantity = serializers.DecimalField(
+        max_digits=14, decimal_places=3, min_value=Decimal("0.001"), default=Decimal("1")
+    )
+    note = serializers.CharField(max_length=300, required=False, allow_blank=True)
+
+
+class JobLineApproveSerializer(serializers.Serializer):
+    unit_price = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
+
+
+class JobLineRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=300)
 
 
 class FreeServiceWriteSerializer(serializers.Serializer):
@@ -1255,7 +1321,7 @@ class SaleCreditSettlementSerializer(serializers.ModelSerializer):
 # Local products
 # ---------------------------------------------------------------------------
 
-class LocalProductSerializer(serializers.ModelSerializer):
+class LocalProductSerializer(CostHiddenMixin, serializers.ModelSerializer):
     sale_price = serializers.DecimalField(
         **MONEY, min_value=Decimal("0"), required=False
     )

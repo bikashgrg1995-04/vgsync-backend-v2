@@ -1078,3 +1078,68 @@ class SaleDocument(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class JobLine(models.Model):
+    """
+    A part or a piece of work the technician asks to add to his job. The
+    office prices it and approves it, and it then becomes a line of the sale
+    (or turns it down with a reason). Only a draft sale takes new lines.
+    """
+
+    class Kind(models.TextChoices):
+        PART = "part", "Part"
+        WORK = "work", "Work"
+
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Asked for"
+        APPROVED = "approved", "Added"
+        REJECTED = "rejected", "Turned down"
+        WITHDRAWN = "withdrawn", "Withdrawn"
+
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name="job_lines")
+    kind = models.CharField(max_length=5, choices=Kind.choices)
+    product = models.ForeignKey(
+        "inventory.Product",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    description = models.CharField(max_length=200, blank=True)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3, default=1)
+    note = models.CharField(max_length=300, blank=True)
+
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.REQUESTED
+    )
+    # What the office charged, set when approved.
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    reject_reason = models.CharField(max_length=300, blank=True)
+
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0), name="job_line_quantity_positive"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(kind="part", product__isnull=False)
+                    | Q(kind="work", product__isnull=True)
+                ),
+                name="job_line_kind_matches_product",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.sale_id} {self.kind} {self.description or self.product_id}"
