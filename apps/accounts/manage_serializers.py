@@ -45,6 +45,11 @@ class StaffSerializer(serializers.ModelSerializer):
         read_only=True,
         default=None,
     )
+    extra_positions = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    extra_position_names = serializers.SerializerMethodField()
+
+    def get_extra_position_names(self, obj):
+        return [p.name for p in obj.extra_positions.all()]
 
     class Meta:
         model = User
@@ -58,6 +63,8 @@ class StaffSerializer(serializers.ModelSerializer):
             "role",
             "position",
             "position_name",
+            "extra_positions",
+            "extra_position_names",
             "is_active",
             "must_change_password",
             "can_sign_in",
@@ -88,11 +95,23 @@ class _StaffInputSerializer(serializers.ModelSerializer):
         },
     )
 
+    # More positions for the same person; access is the union of all.
+    extra_positions = serializers.PrimaryKeyRelatedField(
+        queryset=Position.objects.none(),
+        many=True,
+        required=False,
+        error_messages={
+            "does_not_exist": "Choose active positions of this business.",
+            "incorrect_type": "Choose active positions of this business.",
+        },
+    )
+
     can_sign_in = serializers.BooleanField(required=False)
 
     class Meta:
         model = User
         fields = (
+            "extra_positions",
             "first_name",
             "last_name",
             "email",
@@ -117,6 +136,7 @@ class _StaffInputSerializer(serializers.ModelSerializer):
             )
 
         self.fields["position"].queryset = positions
+        self.fields["extra_positions"].child_relation.queryset = positions
 
     @property
     def business(self):
@@ -159,6 +179,33 @@ class _StaffInputSerializer(serializers.ModelSerializer):
         else:
             position = instance.position if instance else None
 
+        extras = attrs.get("extra_positions")
+
+        if extras is not None:
+            if position is not None and position in extras:
+                raise serializers.ValidationError({
+                    "extra_positions": "The main position is already counted; leave it out.",
+                })
+
+            # Changing who holds which positions is the same right as
+            # choosing a position.
+            requester = self.context["request"].user
+            current = set(instance.extra_positions.all()) if instance else set()
+
+            if (
+                instance is not None
+                and set(extras) != current
+                and requester.role != User.Role.OWNER
+                and not rbac.has_permission(
+                    requester,
+                    "staff.assign_position",
+                    getattr(self.context["request"], "access_mode", "full"),
+                )
+            ):
+                raise serializers.ValidationError(
+                    {"extra_positions": "You may not assign positions."}
+                )
+
         signs_in = attrs.get(
             "can_sign_in", instance.can_sign_in if instance else True
         )
@@ -179,6 +226,7 @@ class _StaffInputSerializer(serializers.ModelSerializer):
 
             # Moving someone out of the staff role drops their position.
             attrs["position"] = None
+            attrs["extra_positions"] = []
 
         return attrs
 
@@ -289,6 +337,7 @@ class StaffCreateSerializer(_StaffInputSerializer):
         if generated:
             password = generate_temporary_password()
 
+        extras = validated_data.pop("extra_positions", [])
         user = User(**validated_data)
 
         # Company users are created from the Head Office; everyone else
@@ -307,6 +356,7 @@ class StaffCreateSerializer(_StaffInputSerializer):
         try:
             with transaction.atomic():
                 user.save()
+                user.extra_positions.set(extras)
         except IntegrityError:
             # Lost a race with another request creating the same username.
             raise serializers.ValidationError(
@@ -326,6 +376,7 @@ class StaffUpdateSerializer(_StaffInputSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         old_position_id = instance.position_id
+        old_extras = set(instance.extra_positions.values_list("pk", flat=True))
         was_signing_in = instance.can_sign_in
 
         user = super().update(instance, validated_data)
@@ -343,7 +394,9 @@ class StaffUpdateSerializer(_StaffInputSerializer):
 
         # A new Position starts clean: one-person exceptions made for the
         # old Position are not carried over silently.
-        if user.position_id != old_position_id:
+        new_extras = set(user.extra_positions.values_list("pk", flat=True))
+
+        if user.position_id != old_position_id or new_extras != old_extras:
             user.permission_overrides.all().delete()
 
         return user

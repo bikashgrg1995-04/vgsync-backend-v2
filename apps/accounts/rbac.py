@@ -432,6 +432,10 @@ def effective_permissions(user, access_mode="full"):
 
         codes = position_codes(position)
 
+        for extra in user.extra_positions.all():
+            if extra.is_active and extra.business_id == position.business_id:
+                codes |= position_codes(extra)
+
         for code, effect in override_map(user).items():
             if effect == "allow":
                 codes.add(code)
@@ -463,6 +467,12 @@ def breakdown(user):
     """
     position = user.position if user.position_id else None
     inherited = position_codes(position) if position else set()
+
+    if position:
+        for extra in user.extra_positions.all():
+            if extra.is_active and extra.business_id == position.business_id:
+                inherited |= position_codes(extra)
+
     overrides = override_map(user)
 
     return {

@@ -90,6 +90,11 @@ class StaffViewSet(viewsets.ModelViewSet):
             .filter(role=User.Role.STAFF)
             .exclude(pk=user.pk)
             .filter(Q(position_id__in=allowed) | Q(position__isnull=True))
+            .exclude(
+                extra_positions__in=scoped_positions(business).exclude(
+                    pk__in=allowed
+                )
+            )
         )
 
     def get_serializer_class(self):
@@ -361,7 +366,12 @@ class PositionViewSet(viewsets.ModelViewSet):
             )
 
         return queryset.prefetch_related("permissions").annotate(
-            staff_count=Count("users", filter=Q(users__is_active=True))
+            staff_count=Count(
+                "users", filter=Q(users__is_active=True), distinct=True
+            )
+            + Count(
+                "extra_users", filter=Q(extra_users__is_active=True), distinct=True
+            )
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -369,7 +379,10 @@ class PositionViewSet(viewsets.ModelViewSet):
 
         # Only people who can still log in hold a position in use. Those who
         # were switched off just lose it; their records are untouched.
-        assigned = position.users.filter(is_active=True).count()
+        assigned = (
+            position.users.filter(is_active=True).count()
+            + position.extra_users.filter(is_active=True).count()
+        )
 
         if assigned:
             raise Conflict(
@@ -380,6 +393,8 @@ class PositionViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             position.users.filter(is_active=False).update(position=None)
+            for ex in position.extra_users.filter(is_active=False):
+                ex.extra_positions.remove(position)
             position.delete()
 
         return Response(status=status.HTTP_204_NO_CONTENT)

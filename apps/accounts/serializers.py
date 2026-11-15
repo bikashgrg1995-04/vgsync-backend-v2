@@ -66,7 +66,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return obj.business.name if obj.business else None
 
     def get_position_name(self, obj):
-        return obj.position.name if obj.position else None
+        if not obj.position:
+            return None
+
+        names = [obj.position.name] + [p.name for p in obj.extra_positions.all()]
+
+        return ", ".join(names)
 
     def _codes(self, obj):
         return rbac.effective_permissions(obj)

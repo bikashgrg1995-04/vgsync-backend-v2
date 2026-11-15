@@ -205,6 +205,14 @@ class User(AbstractUser):
         blank=True,
     )
 
+    # More positions for the same person (a cashier who also handles
+    # purchases). ``position`` stays the main one; access is the union.
+    extra_positions = models.ManyToManyField(
+        Position,
+        related_name="extra_users",
+        blank=True,
+    )
+
     phone = models.CharField(max_length=20, blank=True)
 
     must_change_password = models.BooleanField(default=False)
