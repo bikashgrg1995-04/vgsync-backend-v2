@@ -135,6 +135,23 @@ class SalesBaseViewSet(viewsets.ModelViewSet):
                 "the bike sales permission."
             )
 
+    # A salesperson sees only the sales that are theirs; everyone else who
+    # can see sales and holds ``sales.view_all`` sees them all.
+    def own_sales_only(self):
+        request = self.request
+
+        return not rbac.has_permission(
+            request.user,
+            "sales.view_all",
+            getattr(request, "access_mode", "full"),
+        )
+
+    def scope_to_own(self, queryset, prefix=""):
+        if self.own_sales_only():
+            return queryset.filter(**{f"{prefix}salesperson": self.request.user})
+
+        return queryset
+
     def handle_exception(self, exc):
         # The inventory services raise Django errors (for example "not
         # enough stock"); show them as proper API errors.
@@ -332,6 +349,7 @@ class SaleViewSet(SalesBaseViewSet):
         "sale_type": ["exact"],
         "payment_mode": ["exact"],
         "customer": ["exact"],
+        "salesperson": ["exact"],
         "sale_date": ["gte", "lte"],
     }
     search_fields = (
@@ -426,7 +444,7 @@ class SaleViewSet(SalesBaseViewSet):
         if not self.can_bike("view"):
             queryset = queryset.exclude(sale_type=Sale.SaleType.BIKE)
 
-        return queryset
+        return self.scope_to_own(queryset)
 
     def _respond(self, sale, code=status.HTTP_200_OK):
         fresh = self.get_queryset().get(pk=sale.pk)
@@ -442,6 +460,9 @@ class SaleViewSet(SalesBaseViewSet):
         data = dict(serializer.validated_data)
         data.setdefault("sale_date", timezone.localdate())
         technician_id = data.pop("technician", None)
+        data["salesperson"] = self._salesperson(
+            data.pop("salesperson", None), default=request.user
+        )
         advance = data.pop("advance_amount", None)
         method = data.pop("advance_method", None)
         accident = data.get("service_kind") == Sale.ServiceKind.ACCIDENT
@@ -522,9 +543,40 @@ class SaleViewSet(SalesBaseViewSet):
                 {"advance_amount": "Take the advance as a payment on the sale."}
             )
 
+        if "salesperson" in data:
+            data["salesperson"] = self._salesperson(
+                data["salesperson"], default=sale.salesperson
+            )
+
         sale = update_sale(sale=sale, **data)
 
         return self._respond(sale)
+
+    def _salesperson(self, user_id, default):
+        """Who sold it. Naming someone other than yourself needs ``sales.view_all``."""
+        from apps.accounts.scope import scoped_users
+
+        if user_id is None:
+            return default
+
+        if user_id == self.request.user.pk:
+            return self.request.user
+
+        if self.own_sales_only():
+            raise PermissionDenied(
+                "Only someone who can see all sales can credit a sale to another person."
+            )
+
+        user = scoped_users(self.request.active_business).filter(
+            pk=user_id, is_active=True
+        ).first()
+
+        if user is None:
+            raise ValidationError(
+                {"salesperson": "Choose an active staff member of this business."}
+            )
+
+        return user
 
     def _technician(self, user_id):
         from apps.accounts.scope import scoped_users
@@ -841,6 +893,8 @@ class SalePaymentViewSet(SalesBaseViewSet):
         if not self.can_bike("view"):
             queryset = queryset.exclude(sale__sale_type=Sale.SaleType.BIKE)
 
+        queryset = self.scope_to_own(queryset, "sale__")
+
         return queryset
 
     def create(self, request, *args, **kwargs):
@@ -972,6 +1026,8 @@ class FollowupViewSet(SalesBaseViewSet):
         if not self.can_bike("view"):
             queryset = queryset.exclude(kind__in=BIKE_FOLLOWUP_KINDS)
 
+        queryset = self.scope_to_own(queryset, "sale__")
+
         if self.request.query_params.get("overdue") in ("true", "1"):
             queryset = queryset.filter(
                 status=Followup.Status.PENDING,
@@ -1051,7 +1107,7 @@ class SaleReturnViewSet(SalesBaseViewSet):
     ordering = ("-return_date", "-number")
 
     def get_queryset(self):
-        return (
+        queryset = (
             SaleReturn.objects.filter(business=self.request.active_business)
             .select_related("sale", "customer")
             .prefetch_related(
@@ -1063,6 +1119,8 @@ class SaleReturnViewSet(SalesBaseViewSet):
                 )
             )
         )
+
+        return self.scope_to_own(queryset, "sale__")
 
     def create(self, request, *args, **kwargs):
         serializer = SaleReturnWriteSerializer(

@@ -14,6 +14,7 @@ urlpatterns = [
     path("top-products/", views.TopProductsView.as_view(), name="top-products"),
     path("top-customers/", views.TopCustomersView.as_view(), name="top-customers"),
     path("top-suppliers/", views.TopSuppliersView.as_view(), name="top-suppliers"),
+    path("salespeople/", views.SalespersonPerformanceView.as_view(), name="salespeople"),
     path("technicians/", views.TechnicianPerformanceView.as_view(), name="technicians"),
     path("payroll-summary/", views.PayrollSummaryView.as_view(), name="payroll-summary"),
 ]

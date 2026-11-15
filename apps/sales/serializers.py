@@ -286,6 +286,8 @@ class SaleWriteSerializer(serializers.Serializer):
     )
     # Maintenance, when it is opened: hand the job to a technician at once.
     technician = serializers.IntegerField(required=False, allow_null=True)
+    # Who sold it: the signed-in person unless a manager names someone else.
+    salesperson = serializers.IntegerField(required=False, allow_null=True)
     odometer_km = serializers.IntegerField(
         min_value=0, max_value=9_999_999, required=False, allow_null=True
     )
@@ -457,6 +459,7 @@ class SaleSerializer(serializers.ModelSerializer):
     financer_receivable = serializers.SerializerMethodField()
     financer_received = serializers.SerializerMethodField()
     technician_name = serializers.SerializerMethodField()
+    salesperson_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Sale
@@ -502,6 +505,8 @@ class SaleSerializer(serializers.ModelSerializer):
             "documents_ignored",
             "technician",
             "technician_name",
+            "salesperson",
+            "salesperson_name",
             "job_status",
             "job_assigned_at",
             "job_started_at",
@@ -567,6 +572,11 @@ class SaleSerializer(serializers.ModelSerializer):
 
     def get_payment_status(self, obj):
         return payment_status(obj.amount_due, self._settled(obj))
+
+    def get_salesperson_name(self, obj):
+        user = obj.salesperson
+
+        return (user.get_full_name() or user.username) if user else ""
 
     def get_technician_name(self, obj):
         user = obj.technician

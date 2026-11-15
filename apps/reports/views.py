@@ -282,6 +282,21 @@ class DashboardView(APIView):
         )
 
 
+class SalespersonPerformanceView(OwnerReport):
+    """What each salesperson sold, collected and left due."""
+
+    def get(self, request):
+        date_from, date_to = _range(request)
+
+        return Response({
+            "date_from": date_from,
+            "date_to": date_to,
+            **queries.salesperson_performance(
+                request.active_business, date_from, date_to
+            ),
+        })
+
+
 class TechnicianPerformanceView(OwnerReport):
     """Jobs given to each technician and how many he finished, and how fast."""
 

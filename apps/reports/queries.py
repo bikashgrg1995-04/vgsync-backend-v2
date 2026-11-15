@@ -712,6 +712,69 @@ def payroll_summary(business, date_from, date_to):
     }
 
 
+def salesperson_performance(business, date_from=None, date_to=None):
+    """
+    What each salesperson sold in the period (confirmed sales, by sale date):
+    how many of each kind, the value, what was collected and what is still due.
+    """
+    from apps.sales.models import Sale, SalePayment
+
+    sales = Sale.objects.filter(
+        business=business, status=Sale.Status.CONFIRMED
+    ).select_related("salesperson")
+
+    if date_from:
+        sales = sales.filter(sale_date__gte=date_from)
+
+    if date_to:
+        sales = sales.filter(sale_date__lte=date_to)
+
+    paid = {
+        row["sale"]: row["total"]
+        for row in SalePayment.objects.filter(
+            sale__in=sales, status=SalePayment.Status.ACTIVE
+        ).values("sale").annotate(total=Sum("amount"))
+    }
+
+    people = {}
+
+    for sale in sales:
+        user = sale.salesperson
+        key = user.pk if user else 0
+        row = people.setdefault(key, {
+            "salesperson": key or None,
+            "name": (user.get_full_name() or user.username) if user else "Not recorded",
+            "sales": 0,
+            "bike": 0,
+            "maintenance": 0,
+            "stock": 0,
+            "total": ZERO,
+            "collected": ZERO,
+        })
+        row["sales"] += 1
+        row[sale.sale_type] += 1
+        row["total"] += sale.amount_due
+        row["collected"] += paid.get(sale.pk, ZERO)
+
+    rows = []
+
+    for row in people.values():
+        row["due"] = money(max(row["total"] - row["collected"], ZERO))
+        row["total"] = money(row["total"])
+        row["collected"] = money(row["collected"])
+        rows.append(row)
+
+    rows.sort(key=lambda r: (-float(r["total"]), r["name"]))
+
+    return {
+        "rows": rows,
+        "totals": {
+            "sales": sum(r["sales"] for r in rows),
+            "total": money(sum(Decimal(r["total"]) for r in rows)),
+        },
+    }
+
+
 def technician_performance(business, date_from=None, date_to=None):
     """
     How each technician did on the maintenance jobs given to him in the

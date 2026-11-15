@@ -296,6 +296,15 @@ class Sale(models.Model):
         blank=True,
         related_name="+",
     )
+    # Who sold it. The person who opened the sale unless a manager says
+    # otherwise; a salesperson sees only the sales that are theirs.
+    salesperson = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

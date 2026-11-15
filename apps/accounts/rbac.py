@@ -58,6 +58,7 @@ CATALOG = {
         "refund": "Refund customers",
         "approve": "Approve exceptional sales",
         "collect": "Record customer and company payments",
+        "view_all": "See everyone's sales, not only your own",
     },
     "bike_sales": {
         "view": "View bike sales",
@@ -121,7 +122,9 @@ RESERVED = frozenset({
 PAY_CODES = frozenset({"staff.pay_view", "staff.pay"})
 
 # Codes that only read. These are the only ones a read-only context keeps.
-READ_ACTIONS = frozenset({"view", "export", "pay_view", "view_audit"})
+READ_ACTIONS = frozenset(
+    {"view", "export", "pay_view", "view_audit", "view_all"}
+)
 
 # The four classic flags stored as columns on PositionPermission.
 FLAG_ACTIONS = ("view", "create", "update", "delete")
@@ -206,7 +209,7 @@ PRESETS = {
             "dashboard": ["view"],
             "inventory": ["view", "create", "update", "adjust", "transfer"],
             "purchases": ["view", "create", "update", "receive", "return"],
-            "sales": ["view", "create", "update", "discount", "cancel"],
+            "sales": ["view", "view_all", "create", "update", "discount", "cancel"],
             "bike_sales": _all("bike_sales"),
             "orders": _all("orders"),
             "finance": ["view"],
@@ -225,7 +228,7 @@ PRESETS = {
                 "view", "create", "update", "delete", "void", "reconcile",
             ],
             "reports": ["view", "export"],
-            "sales": ["view", "collect"],
+            "sales": ["view", "view_all", "collect"],
             "bike_sales": ["view"],
             "purchases": ["view", "pay"],
             "inventory": ["view"],
@@ -239,7 +242,8 @@ PRESETS = {
         "grants": {
             "dashboard": ["view"],
             "sales": [
-                "view", "create", "update", "cancel", "discount", "refund",
+                "view", "view_all", "create", "update", "cancel", "discount",
+                "refund",
             ],
             "bike_sales": _all("bike_sales"),
             "orders": _all("orders"),
@@ -300,7 +304,7 @@ PRESETS = {
         "label": "Cashier",
         "department": "Sales",
         "grants": {
-            "sales": ["view", "create"],
+            "sales": ["view", "view_all", "create"],
             "finance": ["view", "create"],
             **_view("inventory"),
         },
