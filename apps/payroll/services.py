@@ -26,6 +26,7 @@ from apps.common.exceptions import Conflict
 from rest_framework import serializers as drf
 
 from .models import (
+    IncentiveRule,
     WorkDay,
     PayrollEntry,
     PayrollPayment,
@@ -479,3 +480,199 @@ def mark_work_day(*, business, actor, staff, day, status, extra=Decimal("0"),
         work.save()
 
     return work
+
+
+# ---------------------------------------------------------------------------
+# Incentives
+# ---------------------------------------------------------------------------
+
+def month_range(month):
+    """First and last day of the month that ``month`` (any date in it) falls in."""
+    import calendar
+
+    first = month.replace(day=1)
+    last = first.replace(day=calendar.monthrange(first.year, first.month)[1])
+
+    return first, last
+
+
+def _rule_applies(rule, user, position_ids):
+    if rule.staff_id:
+        return rule.staff_id == user.pk
+
+    if rule.position_id:
+        return rule.position_id in position_ids
+
+    return True
+
+
+def _bases(business, user, first, last):
+    """What one person did in the month: values and counts the rules pay on."""
+    from django.db.models import Count, Sum
+
+    from apps.sales.models import Sale
+
+    confirmed = Sale.objects.filter(
+        business=business, status=Sale.Status.CONFIRMED
+    )
+
+    sold = confirmed.filter(
+        salesperson=user, sale_date__gte=first, sale_date__lte=last
+    )
+    sales = sold.aggregate(value=Sum("net_total"))["value"] or ZERO
+    bikes = sold.filter(sale_type=Sale.SaleType.BIKE).count()
+
+    jobs = confirmed.filter(
+        sale_type=Sale.SaleType.MAINTENANCE,
+        technician=user,
+        job_status=Sale.JobStatus.DONE,
+        job_done_at__date__gte=first,
+        job_done_at__date__lte=last,
+    ).aggregate(count=Count("id"), value=Sum("net_total"))
+
+    return {
+        "sales_value": sales,
+        "bikes": bikes,
+        "jobs": jobs["count"] or 0,
+        "jobs_value": jobs["value"] or ZERO,
+    }
+
+
+def incentive_for(business, user, month, rules=None):
+    """
+    What ``user`` earned as incentive in ``month``: the lines (one per rule
+    that paid) and the total. Sales returns are not taken off.
+    """
+    first, last = month_range(month)
+
+    if rules is None:
+        rules = IncentiveRule.objects.filter(business=business, is_active=True)
+
+    position_ids = set()
+
+    if user.position_id:
+        position_ids.add(user.position_id)
+        position_ids |= set(user.extra_positions.values_list("pk", flat=True))
+
+    bases = _bases(business, user, first, last)
+    hundred = Decimal("100")
+    lines = []
+
+    for rule in rules:
+        if not _rule_applies(rule, user, position_ids):
+            continue
+
+        if rule.basis == IncentiveRule.Basis.SALE_PERCENT:
+            base, amount = bases["sales_value"], bases["sales_value"] * rule.value / hundred
+        elif rule.basis == IncentiveRule.Basis.BIKE_FIXED:
+            base, amount = bases["bikes"], bases["bikes"] * rule.value
+        elif rule.basis == IncentiveRule.Basis.JOB_FIXED:
+            base, amount = bases["jobs"], bases["jobs"] * rule.value
+        else:
+            base, amount = bases["jobs_value"], bases["jobs_value"] * rule.value / hundred
+
+        amount = amount.quantize(Decimal("0.01"))
+
+        if amount > 0:
+            lines.append({
+                "rule": rule.pk,
+                "name": rule.name,
+                "basis": rule.basis,
+                "base": str(base),
+                "rate": str(rule.value),
+                "amount": str(amount),
+            })
+
+    total = sum((Decimal(line["amount"]) for line in lines), ZERO)
+
+    return lines, total
+
+
+def incentive_preview(business, staff, month):
+    """One row per person who earned something (or already was paid) in ``month``."""
+    first, _ = month_range(month)
+    rules = list(IncentiveRule.objects.filter(business=business, is_active=True))
+
+    paid = {
+        e.staff_id: e
+        for e in PayrollEntry.objects.filter(
+            staff__in=staff,
+            incentive_month=first,
+        ).exclude(status=PayrollEntry.Status.VOID)
+    }
+
+    has_profile = set(
+        SalaryProfile.objects.filter(user__in=staff).values_list("user_id", flat=True)
+    )
+
+    rows = []
+
+    for user in staff.select_related("position"):
+        lines, total = incentive_for(business, user, month, rules)
+        entry = paid.get(user.pk)
+
+        if not lines and entry is None:
+            continue
+
+        rows.append({
+            "staff": user.pk,
+            "name": user.get_full_name() or user.username,
+            "lines": lines,
+            "total": str(total),
+            "has_pay_profile": user.pk in has_profile,
+            "entry": entry.pk if entry else None,
+            "applied_amount": str(entry.amount) if entry else None,
+        })
+
+    rows.sort(key=lambda r: (-Decimal(r["total"]), r["name"]))
+
+    return rows
+
+
+@transaction.atomic
+def apply_incentives(*, business, staff, actor, month, staff_ids=None):
+    """
+    Put the month's incentive in each person's pay as a bonus. A month is
+    paid once per person; someone without a pay profile is skipped.
+    Returns the entries made and who was skipped and why.
+    """
+    first, last = month_range(month)
+    today = timezone.localdate()
+
+    if first > today:
+        raise Conflict("That month has not started yet.", code="future_month")
+
+    made, skipped = [], []
+
+    for row in incentive_preview(business, staff, month):
+        if staff_ids is not None and row["staff"] not in staff_ids:
+            continue
+
+        if row["entry"]:
+            skipped.append({"staff": row["staff"], "reason": "already_applied"})
+            continue
+
+        total = Decimal(row["total"])
+
+        if total <= 0:
+            continue
+
+        user = staff.get(pk=row["staff"])
+
+        if not SalaryProfile.objects.filter(user=user).exists():
+            skipped.append({"staff": user.pk, "reason": "no_pay_profile"})
+            continue
+
+        detail = "; ".join(f'{l["name"]} {l["amount"]}' for l in row["lines"])
+        made.append(PayrollEntry.objects.create(
+            business=payroll_business(user),
+            staff=user,
+            kind=PayrollEntry.Kind.BONUS,
+            entry_date=min(last, today),
+            amount=total,
+            description=f"Incentive {first:%b %Y}: {detail}"[:200],
+            incentive_month=first,
+            created_by=actor,
+        ))
+
+    return made, skipped

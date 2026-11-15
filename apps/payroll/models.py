@@ -143,6 +143,10 @@ class PayrollEntry(models.Model):
     voided_at = models.DateTimeField(null=True, blank=True)
     void_reason = models.TextField(blank=True)
 
+    # Set on a bonus made by "apply incentives": the first day of the month
+    # it was paid for, so a month is never paid twice.
+    incentive_month = models.DateField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -162,6 +166,12 @@ class PayrollEntry(models.Model):
                 fields=["staff", "entry_date"],
                 condition=Q(kind="salary") & ~Q(status="void"),
                 name="unique_live_salary_per_due_date",
+            ),
+            # A month's incentive is paid once per person.
+            models.UniqueConstraint(
+                fields=["staff", "incentive_month"],
+                condition=Q(incentive_month__isnull=False) & ~Q(status="void"),
+                name="unique_live_incentive_per_month",
             ),
             # A day's wage is one entry; edit it to change the amount.
             models.UniqueConstraint(
@@ -306,3 +316,69 @@ class WorkDay(models.Model):
 
     def __str__(self):
         return f"{self.staff} {self.work_date} {self.status}"
+
+
+class IncentiveRule(models.Model):
+    """
+    How an incentive is worked out. A rule applies to everyone, to a
+    position, or to one person (see ``staff`` / ``position``), and pays on
+    what that person did in the month.
+    """
+
+    class Basis(models.TextChoices):
+        SALE_PERCENT = "sale_percent", "% of the value of sales they made"
+        BIKE_FIXED = "bike_fixed", "Fixed amount per bike sold"
+        JOB_FIXED = "job_fixed", "Fixed amount per service job finished"
+        JOB_PERCENT = "job_percent", "% of the value of service jobs finished"
+
+    business = models.ForeignKey(
+        "businesses.Business",
+        on_delete=models.CASCADE,
+        related_name="incentive_rules",
+    )
+    name = models.CharField(max_length=100)
+    basis = models.CharField(max_length=15, choices=Basis.choices)
+    # A percentage for the "percent" bases, an amount for the "fixed" ones.
+    value = models.DecimalField(max_digits=12, decimal_places=2)
+
+    # Neither set = everyone. Both set is not allowed.
+    staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    position = models.ForeignKey(
+        "accounts.Position",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(value__gt=0), name="incentive_value_positive"
+            ),
+            models.CheckConstraint(
+                condition=Q(staff__isnull=True) | Q(position__isnull=True),
+                name="incentive_one_target",
+            ),
+        ]
+
+    def __str__(self):
+        return self.name

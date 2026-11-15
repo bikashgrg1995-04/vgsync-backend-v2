@@ -5,7 +5,14 @@ from rest_framework import serializers
 
 from apps.accounts.scope import scoped_users
 
-from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile, WorkDay
+from .models import (
+    IncentiveRule,
+    PayrollEntry,
+    PayrollPayment,
+    PayType,
+    SalaryProfile,
+    WorkDay,
+)
 from .services import first_accrued_through
 
 AMOUNT = {"max_digits": 12, "decimal_places": 2, "min_value": 0}
@@ -352,3 +359,55 @@ class WorkMarkSerializer(serializers.Serializer):
 class WorkSheetSerializer(serializers.Serializer):
     date = serializers.DateField()
     marks = WorkMarkSerializer(many=True, allow_empty=False, max_length=300)
+
+
+class IncentiveRuleSerializer(serializers.ModelSerializer):
+    """A rule for working out incentive. Applies to everyone unless a person or a position is named."""
+
+    staff_name = serializers.SerializerMethodField()
+    position_name = serializers.CharField(source="position.name", read_only=True, default=None)
+    basis_label = serializers.CharField(source="get_basis_display", read_only=True)
+
+    class Meta:
+        model = IncentiveRule
+        fields = (
+            "id", "name", "basis", "basis_label", "value", "staff",
+            "staff_name", "position", "position_name", "is_active",
+            "created_at",
+        )
+        read_only_fields = ("id", "created_at")
+
+    def get_staff_name(self, obj):
+        return staff_name(obj.staff) if obj.staff else None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+
+        if request is not None and getattr(request, "active_business", None):
+            from apps.accounts.scope import scoped_positions
+
+            business = request.active_business
+            self.fields["staff"].queryset = scoped_users(business)
+            self.fields["position"].queryset = scoped_positions(business)
+
+    def validate(self, attrs):
+        instance = self.instance
+        basis = attrs.get("basis", instance.basis if instance else None)
+        value = attrs.get("value", instance.value if instance else None)
+        staff = attrs.get("staff", instance.staff if instance else None)
+        position = attrs.get("position", instance.position if instance else None)
+
+        if value is not None and value <= 0:
+            raise serializers.ValidationError({"value": "Must be more than zero."})
+
+        if basis in (IncentiveRule.Basis.SALE_PERCENT, IncentiveRule.Basis.JOB_PERCENT):
+            if value is not None and value > 100:
+                raise serializers.ValidationError({"value": "A percentage cannot be more than 100."})
+
+        if staff and position:
+            raise serializers.ValidationError(
+                "Choose one person or one position, not both. Leave both empty for everyone."
+            )
+
+        return attrs

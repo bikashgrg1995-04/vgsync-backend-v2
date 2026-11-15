@@ -54,6 +54,7 @@ TRACKED = {
     "finance.Reconciliation": True,
     "payroll.PayrollPayment": True,
     "payroll.SalaryProfile": True,
+    "payroll.IncentiveRule": True,
     "accounts.User": True,
     "accounts.Position": True,
     "businesses.Business": True,

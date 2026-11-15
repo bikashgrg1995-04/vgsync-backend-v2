@@ -15,8 +15,16 @@ from apps.accounts.scope import scoped_users
 from apps.common.pagination import StandardPagination
 from apps.common.permissions import IsOwner, OwnerOrPermission
 
-from .models import PayrollEntry, PayrollPayment, PayType, SalaryProfile, WorkDay
+from .models import (
+    IncentiveRule,
+    PayrollEntry,
+    PayrollPayment,
+    PayType,
+    SalaryProfile,
+    WorkDay,
+)
 from .serializers import (
+    IncentiveRuleSerializer,
     BalanceDetailSerializer,
     BalanceSerializer,
     PayrollEntrySerializer,
@@ -28,6 +36,9 @@ from .serializers import (
     staff_name,
 )
 from .services import (
+    apply_incentives,
+    incentive_for,
+    incentive_preview,
     balance,
     create_payment,
     ensure_accruals,
@@ -641,4 +652,105 @@ class StaffAttendanceView(APIView):
                 "note": m.note,
                 "amount": m.entry.amount if m.entry else 0,
             } for m in marks],
+        })
+
+
+# ---------------------------------------------------------------------------
+# Incentives
+# ---------------------------------------------------------------------------
+
+def _month(request):
+    from datetime import date
+
+    raw = request.query_params.get("month") or (
+        request.data.get("month") if request.method == "POST" else None
+    )
+
+    if not raw:
+        return timezone.localdate().replace(day=1)
+
+    try:
+        year, month = (int(x) for x in str(raw).split("-")[:2])
+
+        return date(year, month, 1)
+    except (ValueError, TypeError):
+        from rest_framework.exceptions import ValidationError
+
+        raise ValidationError({"month": "Use the form YYYY-MM."})
+
+
+class IncentiveRuleViewSet(viewsets.ModelViewSet):
+    """How incentives are worked out. Anyone who may see pay can read them; only the owner changes them."""
+
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
+    serializer_class = IncentiveRuleSerializer
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return IncentiveRule.objects.filter(
+            business=self.request.active_business
+        ).select_related("staff", "position")
+
+    def perform_create(self, serializer):
+        serializer.save(
+            business=self.request.active_business, created_by=self.request.user
+        )
+
+
+class IncentiveView(APIView):
+    """
+    ``GET ?month=YYYY-MM``: what each person earned as incentive that month.
+    ``POST {month, staff?}``: put it in their pay as a bonus (once per month).
+    """
+
+    permission_classes = [OwnerOrPermission]
+    read_permission = "staff.pay_view"
+    write_permission = "staff.pay"
+
+    def get(self, request):
+        month = _month(request)
+        staff = scoped_users(request.active_business).filter(is_active=True)
+
+        return Response({
+            "month": month.isoformat(),
+            "rows": incentive_preview(request.active_business, staff, month),
+        })
+
+    def post(self, request):
+        month = _month(request)
+        ids = request.data.get("staff")
+        staff = scoped_users(request.active_business).filter(is_active=True)
+
+        made, skipped = apply_incentives(
+            business=request.active_business,
+            staff=staff,
+            actor=request.user,
+            month=month,
+            staff_ids=set(ids) if isinstance(ids, list) else None,
+        )
+
+        return Response({
+            "month": month.isoformat(),
+            "applied": [
+                {"staff": e.staff_id, "entry": e.pk, "amount": str(e.amount)}
+                for e in made
+            ],
+            "skipped": skipped,
+        }, status=status.HTTP_201_CREATED)
+
+
+class MyIncentiveView(APIView):
+    """The signed-in person's own incentive so far this month (or ``?month=``)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        month = _month(request)
+        lines, total = incentive_for(request.active_business, request.user, month)
+
+        return Response({
+            "month": month.isoformat(),
+            "lines": lines,
+            "total": str(total),
         })
