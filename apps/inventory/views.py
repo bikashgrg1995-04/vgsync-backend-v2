@@ -512,6 +512,9 @@ class ProductTemplateView(InventoryBaseView):
     def get(self, request):
         from apps.inventory.services import importing
 
+        if request.query_params.get("mode") == "stock":
+            return _file(importing.stock_template(), "stock-import-template.xlsx")
+
         return _file(importing.template(), "product-import-template.xlsx")
 
 
@@ -527,10 +530,23 @@ class ProductImportView(InventoryBaseView):
 
         mode = request.data.get("mode") or "products"
 
-        if mode not in ("products", "prices"):
-            raise ValidationError({"mode": "Use products or prices."})
+        if mode not in ("products", "prices", "stock"):
+            raise ValidationError({"mode": "Use products, prices or stock."})
 
         apply = str(request.data.get("apply", "")).lower() == "true"
+
+        if mode == "stock":
+            if not rbac.has_permission(
+                request.user, "inventory.adjust", getattr(request, "access_mode", "full")
+            ):
+                raise PermissionDenied("You do not have permission to change stock.")
+
+            result = importing.run_stock(
+                request.user, request.active_business, request.FILES.get("file"), apply=apply
+            )
+            result["applied"] = bool(apply and not result["errors"])
+
+            return Response(result)
 
         # Adding products needs ``create``; changing existing ones ``update``.
         can_update = rbac.has_permission(

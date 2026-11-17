@@ -188,6 +188,88 @@ def _clean(row, *, mode):
     return values, quantity, errors
 
 
+def run_stock(user, business, upload, *, apply=False):
+    """
+    Set current stock from a count sheet: ``Stock No`` and ``Quantity``.
+
+    Each product's good stock is brought to the quantity in the file by one
+    adjustment movement for the difference (products already at that quantity
+    are left alone). Works for any business, branches included, because it
+    only changes stock, never the catalogue. Nothing is saved with problems.
+    """
+    from apps.inventory.models import StockBalance
+    from apps.inventory.services.validators import validate_business_available, validate_inventory_access
+
+    validate_business_available(business)
+    validate_inventory_access(user, business, write=True)
+    columns, rows = read_rows(upload)
+
+    if "stock_no" not in columns:
+        raise ValidationError({"file": "There is no Stock No column. Download the template to see the layout."})
+
+    if "quantity" not in columns:
+        raise ValidationError({"file": "There is no Quantity column."})
+
+    products = {p.stock_no.lower(): p for p in get_products_for_business(business)}
+    have = {b.product_id: b.quantity for b in StockBalance.objects.filter(business=business)}
+    seen, errors, plan = {}, [], []
+    unchanged = 0
+
+    for row in rows:
+        number = row["_row"]
+        problems = []
+        stock_no = str(row.get("stock_no") or "").strip()
+
+        if isinstance(row.get("stock_no"), float) and row["stock_no"].is_integer():
+            stock_no = str(int(row["stock_no"]))
+
+        key = stock_no.lower()
+        quantity = _decimal(row.get("quantity"), "Quantity", problems, places=3)
+
+        if not stock_no:
+            problems.append("Stock No is missing.")
+        elif key in seen:
+            problems.append(f"Stock No {stock_no} is also on row {seen[key]}.")
+        else:
+            seen[key] = number
+
+        if quantity is None and not problems:
+            problems.append("Quantity is missing.")
+
+        product = products.get(key)
+
+        if stock_no and product is None:
+            problems.append(f"No product has Stock No {stock_no}.")
+
+        if problems:
+            errors.extend({"row": number, "message": m} for m in problems)
+            continue
+
+        current = have.get(product.pk, Decimal("0"))
+
+        if quantity == current:
+            unchanged += 1
+        else:
+            plan.append((product, quantity, current))
+
+    result = {"created": 0, "updated": len(plan), "unchanged": unchanged, "errors": errors}
+
+    if errors or not apply:
+        return result
+
+    with transaction.atomic():
+        for product, quantity, current in plan:
+            move = StockMovement.MovementType
+            create_stock_movement(
+                user=user, business=business, product=product,
+                movement_type=move.ADJUSTMENT_IN if quantity > current else move.ADJUSTMENT_OUT,
+                quantity=abs(quantity - current), reference="Stock import",
+                notes=f"Stock set to {quantity} from import (was {current})",
+            )
+
+    return result
+
+
 def run(user, business, upload, *, mode="products", apply=False, can_update=True):
     """
     Check (and, with ``apply``, save) a file. ``mode`` is ``products`` to add
@@ -357,6 +439,10 @@ def export_products(business, *, with_cost=True):
         body.append(line)
 
     return _workbook([label for _, label in columns], body)
+
+
+def stock_template():
+    return _workbook(["Stock No", "Quantity"], [["BRK-001", 20]])
 
 
 def template():

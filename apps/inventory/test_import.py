@@ -145,3 +145,56 @@ class ImportTests(ReturnTestCase):
         self.authenticate("ACME-BR", "bowner")
 
         self.assertEqual(self.post(sheet([["N-1", "Oil", "1", "", "", ""]])).status_code, 403)
+
+
+class StockImportTests(ReturnTestCase):
+    def post(self, upload, **extra):
+        return self.client.post(
+            BASE + "import/", {"file": upload, "mode": "stock", **extra}, format="multipart"
+        )
+
+    def setUp(self):
+        super().setUp()
+        self.client.post(
+            BASE + "import/",
+            {"file": sheet([["S-1", "Oil", "100", "", "", "5"], ["S-2", "Plug", "50", "", "", ""]]),
+             "apply": "true"},
+            format="multipart",
+        )
+
+    def qty(self, stock_no):
+        b = StockBalance.objects.filter(product__stock_no=stock_no, business=self.ho).first()
+
+        return b.quantity if b else Decimal("0")
+
+    def test_preview_changes_nothing(self):
+        data = self.post(xlsx([["S-1", 9]], header=("Stock No", "Quantity"))).json()
+
+        self.assertEqual((data["updated"], data["errors"], data["applied"]), (1, [], False))
+        self.assertEqual(self.qty("S-1"), Decimal("5"))
+
+    def test_apply_sets_stock_up_and_down_and_records_movements(self):
+        data = self.post(
+            xlsx([["S-1", 2], ["S-2", 40]], header=("Stock No", "Quantity")), apply="true"
+        ).json()
+
+        self.assertTrue(data["applied"], data)
+        self.assertEqual((self.qty("S-1"), self.qty("S-2")), (Decimal("2"), Decimal("40")))
+        kinds = set(StockMovement.objects.filter(reference="Stock import").values_list("movement_type", flat=True))
+        self.assertEqual(kinds, {"adjustment_in", "adjustment_out"})
+
+    def test_same_quantity_is_unchanged_and_bad_rows_block_everything(self):
+        data = self.post(xlsx([["S-1", 5]], header=("Stock No", "Quantity")), apply="true").json()
+        self.assertEqual((data["updated"], data["unchanged"]), (0, 1))
+
+        data = self.post(
+            xlsx([["S-2", 7], ["NOPE", 1], ["S-1", "x"]], header=("Stock No", "Quantity")), apply="true"
+        ).json()
+        self.assertFalse(data["applied"])
+        self.assertEqual([e["row"] for e in data["errors"]], [3, 4])
+        self.assertEqual(self.qty("S-2"), Decimal("0"))
+
+    def test_template_download(self):
+        r = self.client.get(BASE + "import-template/?mode=stock")
+
+        self.assertEqual(r.status_code, 200)
