@@ -1147,8 +1147,8 @@ class FollowupViewSet(SalesBaseViewSet):
 
 class SaleReturnViewSet(SalesBaseViewSet):
     """
-    Goods customers brought back from confirmed sales: stock goods or the
-    parts of a maintenance sale (not a bike, not a service charge). A return puts the goods back into
+    Goods customers brought back from confirmed **stock** sales (servicing and
+    bike sales cannot be returned). A return puts the goods back into
     stock; its value first takes off what the customer owes on that sale and
     the rest is **credit to pay** to the customer. Never edited or deleted;
     ``void`` undoes it. Filters: ``sale``, ``customer``, ``status``,

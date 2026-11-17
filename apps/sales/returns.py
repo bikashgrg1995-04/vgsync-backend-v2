@@ -105,6 +105,14 @@ def create_return(*, sale, user, return_date, reason, notes="", items,
         .get(pk=sale.pk)
     )
 
+    if sale.sale_type != Sale.SaleType.STOCK:
+        raise serializers.ValidationError({
+            "sale": (
+                "Only goods from a stock sale can be returned, not a "
+                "servicing or a bike sale."
+            )
+        })
+
     if sale.status != Sale.Status.CONFIRMED:
         raise Conflict(
             "Only goods from a confirmed sale can be returned; this sale is "

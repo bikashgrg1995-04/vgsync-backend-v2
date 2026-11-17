@@ -385,7 +385,11 @@ class SaleItemSerializer(serializers.ModelSerializer):
         return f"{self._returned(obj):.3f}"
 
     def get_returnable_quantity(self, obj):
-        # A service charge and a bike cannot be returned.
+        # Only stock sales take goods back: not servicing, not a bike, and not
+        # a service charge or local product on a stock sale.
+        if obj.sale.sale_type != Sale.SaleType.STOCK:
+            return "0.000"
+
         if obj.product_id is None or obj.bike_unit_id:
             return "0.000"
 

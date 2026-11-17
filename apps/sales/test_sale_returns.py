@@ -800,33 +800,23 @@ class ServiceChargeTests(ReturnTestCase):
 
         return self.detail(sale["id"])
 
-    def test_parts_of_a_maintenance_sale_can_be_returned(self):
+    def test_a_servicing_sale_cannot_be_returned(self):
         sale = self.maintenance_sale()
 
-        data = self.returned(sale, "1", index=0)
-
-        self.assertEqual(data["credit_amount"], "150.00")
-        self.assertEqual(self.stock(), dec("49"))
-
-    def test_a_service_charge_cannot_be_returned(self):
-        sale = self.maintenance_sale()
-
-        response = self.send_back(sale, "1", index=1)
+        response = self.send_back(sale, "1", index=0)
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("service charge", str(response.data["items"]))
-        self.assertEqual(self.detail(sale["id"])["items"][1]["returnable_quantity"], "0.000")
+        self.assertIn("stock sale", str(response.data["sale"]))
+        self.assertFalse(SaleReturn.objects.exists())
+        self.assertEqual(self.stock(), dec("48"))
 
-    def test_a_service_charge_does_not_stop_the_discount_share(self):
-        sale = self.made_maintenance(discount_amount="80.00")
-        self.pay(sale["id"], "720.00")
-        self.confirm(sale["id"])
-        sale = self.detail(sale["id"])
+    def test_a_servicing_sale_shows_nothing_to_return(self):
+        sale = self.maintenance_sale()
 
-        data = self.returned(sale, "2")
-
-        # 300 of 800 -> share of the 80 discount is 30
-        self.assertEqual(data["credit_amount"], "270.00")
+        self.assertEqual(
+            [line["returnable_quantity"] for line in sale["items"]],
+            ["0.000"] * len(sale["items"]),
+        )
 
 
 class BikeReturnTests(ReturnTestCase):
@@ -844,7 +834,7 @@ class BikeReturnTests(ReturnTestCase):
         response = self.send_back(sale, "1")
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("bike cannot be returned", str(response.data["items"]))
+        self.assertIn("stock sale", str(response.data["sale"]))
         self.assertFalse(SaleReturn.objects.exists())
         self.assertEqual(BikeUnit.objects.get().status, "sold")
         self.assertEqual(self.stock_of(self.model), dec("4"))
