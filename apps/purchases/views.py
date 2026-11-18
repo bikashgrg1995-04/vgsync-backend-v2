@@ -294,6 +294,7 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         "receive": "receive",
         "due_date": "update",
         "import_lines": "create",
+        "import_template": "create",
     }
     """
     Purchases of the active business.
@@ -390,6 +391,25 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         fresh = self.get_queryset().get(pk=purchase.pk)
 
         return Response(PurchaseDetailSerializer(fresh).data, status=code)
+
+    @action(detail=False, methods=["get"], url_path="import-template")
+    def import_template(self, request):
+        """A sample file for ``import-lines``: Stock No, Stock Name, Quantity, Unit Price."""
+        from django.http import HttpResponse
+
+        from apps.inventory.services import importing
+
+        body = importing._workbook(
+            ["Stock No", "Stock Name", "Quantity", "Unit Price"],
+            [["BRK-001", "Brake pad (front)", 20, 300]],
+        )
+        response = HttpResponse(
+            body,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = 'attachment; filename="purchase-import-template.xlsx"'
+
+        return response
 
     @action(detail=False, methods=["post"], url_path="import-lines")
     def import_lines(self, request):

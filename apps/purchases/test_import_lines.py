@@ -56,3 +56,14 @@ class ImportLinesTests(PurchaseTestCase):
         self.authenticate("ACME-HO", "viewer")
 
         self.assertEqual(self.read(sheet([["OIL-1", "1", "5"]])).status_code, 403)
+
+    def test_template_download_and_a_stock_name_column_is_ignored(self):
+        r = self.client.get(BASE + "import-template/")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("spreadsheetml", r["Content-Type"])
+
+        data = self.read(sheet([["OIL-1", "Whatever name", "4", "95"]],
+                               header=("Stock No", "Stock Name", "Quantity", "Unit Price"))).json()
+        self.assertEqual(data["errors"], [])
+        self.assertEqual(data["lines"][0]["quantity"], "4.000")
