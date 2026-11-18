@@ -67,3 +67,26 @@ class ImportLinesTests(PurchaseTestCase):
                                header=("Stock No", "Stock Name", "Quantity", "Unit Price"))).json()
         self.assertEqual(data["errors"], [])
         self.assertEqual(data["lines"][0]["quantity"], "4.000")
+
+    HEAD = ("Stock No", "Stock Name", "Quantity", "Unit Price")
+
+    def test_an_unknown_stock_no_with_a_name_and_price_comes_back_as_new(self):
+        data = self.read(sheet([["NEW-1", "Brand new part", "3", "55"], ["OIL-1", "x", "1", "90"]],
+                               header=self.HEAD)).json()
+
+        self.assertEqual(data["errors"], [])
+        self.assertEqual([(l["stock_no"], l["is_new"], l["product"] is None) for l in data["lines"]],
+                         [("NEW-1", True, True), ("OIL-1", False, False)])
+
+    def test_a_new_product_needs_a_name_and_a_price(self):
+        data = self.read(sheet([["NEW-1", "", "3", "55"], ["NEW-2", "Named", "3", ""]], header=self.HEAD)).json()
+
+        self.assertEqual([e["row"] for e in data["errors"]], [2, 3])
+        self.assertIn("Stock Name", data["errors"][0]["message"])
+
+    def test_a_branch_cannot_bring_in_new_products(self):
+        self.authenticate("ACME-BR", "owner")
+        r = self.read(sheet([["NEW-1", "Brand new part", "3", "55"]], header=self.HEAD))
+
+        # Either refused outright or listed as an error, never offered as new.
+        self.assertTrue(r.status_code in (400, 403) or r.json()["lines"] == [])

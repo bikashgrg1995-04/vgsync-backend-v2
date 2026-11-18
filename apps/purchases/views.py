@@ -427,8 +427,20 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         if not rows or "stock_no" not in rows[0] or "quantity" not in rows[0]:
             raise ValidationError({"file": "The file needs Stock No and Quantity columns."})
 
+        from apps.accounts import rbac
+        from apps.businesses.models import Business
+
         catalogue = {p.stock_no.lower(): p for p in get_products_for_business(request.active_business)}
         lines, errors, seen = [], [], {}
+        # A stock number that is not in the catalogue can come in as a NEW
+        # product, but only when this business keeps a catalogue and the user
+        # may add products. The page asks before creating them.
+        may_add = (
+            request.active_business.business_type != Business.BusinessType.BRANCH
+            and rbac.has_permission(
+                request.user, "inventory.create", getattr(request, "access_mode", "full")
+            )
+        )
 
         for row in rows:
             number, problems = row["_row"], []
@@ -438,8 +450,11 @@ class PurchaseViewSet(PurchaseBaseViewSet):
 
             if not stock_no:
                 problems.append("Stock No is missing.")
-            elif product is None:
-                problems.append(f"No product has Stock No {stock_no}.")
+            elif product is None and not (may_add and str(row.get("name") or "").strip()):
+                problems.append(
+                    f"No product has Stock No {stock_no}."
+                    + (" Add a Stock Name to bring it in as a new product." if may_add else "")
+                )
             elif stock_no.lower() in seen:
                 problems.append(f"Stock No {stock_no} is also on row {seen[stock_no.lower()]}.")
             else:
@@ -454,15 +469,28 @@ class PurchaseViewSet(PurchaseBaseViewSet):
 
             price = importing._decimal(row.get("purchase_price"), "Unit price", problems, places=2)
 
+            if product is None and stock_no and not problems and (price is None or price <= 0):
+                problems.append("A new product needs a Unit Price.")
+
             if product is not None and not any("Unit price" in m for m in problems):
                 if (price if price is not None else product.purchase_price) <= 0:
                     problems.append("Unit price is missing and the product has no purchase price.")
 
             if problems:
                 errors.extend({"row": number, "message": m} for m in problems)
+            elif product is None:
+                lines.append({
+                    "product": None,
+                    "is_new": True,
+                    "stock_no": stock_no,
+                    "name": str(row.get("name")).strip()[:200],
+                    "quantity": f"{quantity:.3f}",
+                    "unit_price": f"{price:.2f}",
+                })
             else:
                 lines.append({
                     "product": product.pk,
+                    "is_new": False,
                     "stock_no": product.stock_no,
                     "name": product.name,
                     "quantity": f"{quantity:.3f}",
