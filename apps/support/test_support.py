@@ -30,8 +30,9 @@ class FaqTests(SupportTestCase):
     def test_the_migration_seeds_the_faqs(self):
         questions = [faq["question"] for faq in self.client.get(FAQS).json()["results"]]
 
-        self.assertEqual(questions[0], "How to add a new product?")
-        self.assertIn("Can I get a refund?", questions)
+        self.assertEqual(questions[0], "How do I add a new product?")
+        self.assertIn("How do I record a sales return?", questions)
+        self.assertGreaterEqual(len(questions), 14)
 
     def test_only_published_faqs_are_listed_in_order(self):
         Faq.objects.all().delete()
@@ -46,8 +47,11 @@ class FaqTests(SupportTestCase):
 
     def test_search_looks_in_question_and_answer(self):
         results = self.client.get(FAQS, {"search": "Excel"}).json()["results"]
+        questions = [faq["question"] for faq in results]
 
-        self.assertEqual([faq["question"] for faq in results], ["How to generate sales report?"])
+        self.assertIn("How do I get a sales report?", questions)
+        self.assertIn("How do I import my current stock from Excel?", questions)
+        self.assertNotIn("How do I make a sale?", questions)
 
     def test_faqs_cannot_be_written_through_the_api(self):
         self.assertEqual(self.client.post(FAQS, {}, format="json").status_code, 405)
