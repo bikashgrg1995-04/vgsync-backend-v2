@@ -128,14 +128,30 @@ def _product_rows(grouped):
             warnings.append(f"A stock row (id {row['pk']}) has no item number and was skipped.")
             continue
 
+        name_now = " ".join(str(f["name"] or "").lower().split())
+
+        if key in by_no and by_no[key]["_name"] != name_now:
+            # Same stock number, different item: keep both, number the later one.
+            n = 2
+
+            while f"{key} ({n})" in by_no:
+                n += 1
+
+            number, key = f"{number} ({n})"[:100], f"{key} ({n})"
+            warnings.append(
+                f"Stock No {f['item_no']} is used by two different items ({f['name']}); "
+                f"the second one was saved as {number}."
+            )
+
         if key in by_no:
             warnings.append(
-                f"Stock No {number} appears more than once in the old data; the entries were merged."
+                f"Stock No {number} appears more than once with the same name in the old data; the entries were merged."
             )
             by_no[key]["quantity"] += qty(f["stock"])
         else:
             block = _clip(f.get("block"), 40)
             by_no[key] = {
+                "_name": name_now,
                 "stock_no": number,
                 "name": _clip(f["name"], 200) or number,
                 "model": _clip(f.get("model"), 100),

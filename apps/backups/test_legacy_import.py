@@ -74,7 +74,7 @@ class LegacyImportTests(TenantTestMixin, APITestCase):
         r = self.post("legacy-preview/")
 
         self.assertEqual(r.status_code, 200, r.content)
-        self.assertEqual(r.json()["created"]["products"], 2)
+        self.assertEqual(r.json()["created"]["products"], 3)
         self.assertEqual(r.json()["not_imported"], [{"what": "staff records (add them in Staff)", "count": 1}])
         self.assertFalse(Sale.objects.filter(business=self.biz).exists())
         self.assertFalse(Product.objects.filter(owner_business=self.biz).exists())
@@ -91,7 +91,11 @@ class LegacyImportTests(TenantTestMixin, APITestCase):
         self.assertTrue(BackupLog.objects.filter(business=self.biz, kind="safety").exists())
 
         oil = Product.objects.get(owner_business=self.biz, stock_no="A-1")
-        self.assertEqual(StockBalance.objects.get(product=oil, business=self.biz).quantity, 6)  # A-1 and a-1 are one product: 5 + 1
+        self.assertEqual(StockBalance.objects.get(product=oil, business=self.biz).quantity, 5)
+        # a-1 is a different item (another name) on the same number: kept apart.
+        dup = Product.objects.get(owner_business=self.biz, name="Oil dup")
+        self.assertEqual(dup.stock_no, "a-1 (2)")
+        self.assertEqual(StockBalance.objects.get(product=dup, business=self.biz).quantity, 1)
 
         sale = Sale.objects.get(business=self.biz)
         self.assertEqual(sale.status, "confirmed")
