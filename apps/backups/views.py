@@ -51,6 +51,8 @@ class BackupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         "create": "create",
         "preview": "restore",
         "restore": "restore",
+        "legacy_preview": "restore",
+        "legacy_import": "restore",
         "download": "restore",
     }
     serializer_class = BackupLogSerializer
@@ -162,6 +164,79 @@ class BackupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         BackupLog.objects.filter(pk__in=[o.pk for o in old]).delete()
 
         return Response({"restored": apply_restore_result})
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="legacy-preview",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def legacy_preview(self, request):
+        """Read the old system's data file and say what would come in."""
+        from . import legacy_import
+
+        try:
+            result = legacy_import.run(
+                request.user, request.active_business, self._upload(request), apply=False
+            )
+        except (RestoreError, legacy_import.LegacyError) as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="legacy-import",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def legacy_import(self, request):
+        """
+        Import the old system's history. A safety copy of this business is
+        taken first and kept, so the import can be undone with a restore.
+        Nothing is saved if anything fails.
+        """
+        from . import legacy_import
+
+        business = request.active_business
+
+        if request.data.get("confirm") != business.business_code:
+            return Response(
+                {"detail": f"Type {business.business_code} to confirm the import."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            data = self._upload(request)
+            legacy_import.run(request.user, business, data, apply=False)  # validates
+
+            safety, summary = build_backup(request.user, business)
+            result = legacy_import.run(request.user, business, data, apply=True)
+        except (RestoreError, legacy_import.LegacyError) as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.notifications.services import generate_for_business, generate_payables
+
+        for scoped in businesses_in_scope(request.user, business):
+            generate_for_business(scoped)
+            generate_payables(scoped)
+
+        BackupLog.objects.create(
+            business=business,
+            created_by=request.user,
+            created_by_name=self._who(request),
+            kind=BackupLog.Kind.SAFETY,
+            data=safety,
+            **summary,
+        )
+        old = BackupLog.objects.filter(
+            business=business, kind=BackupLog.Kind.SAFETY
+        ).order_by("-id")[KEEP_SAFETY_COPIES:]
+        BackupLog.objects.filter(pk__in=[o.pk for o in old]).delete()
+
+        result["safety_copy"] = True
+
+        return Response(result)
 
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):
