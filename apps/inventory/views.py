@@ -512,6 +512,9 @@ class ProductTemplateView(InventoryBaseView):
     def get(self, request):
         from apps.inventory.services import importing
 
+        if request.query_params.get("mode") == "prices":
+            return _file(importing.prices_template(), "update-prices-template.xlsx")
+
         if request.query_params.get("mode") == "stock":
             return _file(importing.stock_template(), "stock-import-template.xlsx")
 

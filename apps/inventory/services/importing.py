@@ -31,7 +31,7 @@ MAX_ROWS = 5000
 # spaces, dots and dashes treated as underscores).
 ALIASES = {
     "stock_no": ("stock_no", "stock_number", "sku", "code", "item_code", "part_no", "part_number"),
-    "name": ("name", "product", "product_name", "item", "item_name"),
+    "name": ("name", "stock_name", "product", "product_name", "item", "item_name"),
     "brand": ("brand", "make"),
     "model": ("model",),
     "category": ("category",),
@@ -180,8 +180,15 @@ def _clean(row, *, mode):
     quantity = _decimal(row.get("quantity"), "Quantity", errors, places=3)
 
     if mode == "prices":
-        if "mrp" not in values:
-            errors.append("MRP is missing.")
+        if not values.get("name"):
+            values.pop("name", None)
+
+        if not any(k in values for k in MONEY):
+            errors.append("No price on this row.")
+
+        # A file with only a selling price moves the MRP along with it.
+        if "sale_price" in values and "mrp" not in values and "mrp" not in row:
+            values["mrp"] = values["sale_price"]
 
         return values, None, errors
 
@@ -287,8 +294,8 @@ def run(user, business, upload, *, mode="products", apply=False, can_update=True
     if mode == "products" and "name" not in columns:
         raise ValidationError({"file": "There is no Name column. Download the template to see the layout."})
 
-    if mode == "prices" and "mrp" not in columns:
-        raise ValidationError({"file": "There is no MRP column."})
+    if mode == "prices" and not any(c in columns for c in MONEY):
+        raise ValidationError({"file": "There is no price column (MRP, Purchase Price or Selling Price)."})
 
     existing = {p.stock_no.lower(): p for p in get_products_for_business(business)}
     seen = {}
@@ -334,7 +341,7 @@ def run(user, business, upload, *, mode="products", apply=False, can_update=True
                 if k != "stock_no" and getattr(product, k) != v}
 
         if mode == "prices":
-            diff = {k: v for k, v in diff.items() if k in MONEY}
+            diff = {k: v for k, v in diff.items() if k in MONEY or k == "name"}
 
         if diff and not can_update:
             errors.append({
@@ -439,6 +446,13 @@ def export_products(business, *, with_cost=True):
         body.append(line)
 
     return _workbook([label for _, label in columns], body)
+
+
+def prices_template():
+    return _workbook(
+        ["Stock No", "Stock Name", "Purchase Price", "Selling Price"],
+        [["BRK-001", "Brake pad (front)", 300, 400]],
+    )
 
 
 def stock_template():

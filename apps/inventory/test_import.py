@@ -100,7 +100,29 @@ class ImportTests(ReturnTestCase):
         data = self.post(xlsx([["N-1", "Renamed", 130]]), mode="prices", apply="true").json()
         self.assertTrue(data["applied"], data)
         oil = Product.objects.get(stock_no="N-1", owner_business=self.ho)
-        self.assertEqual((oil.mrp, oil.name), (Decimal("130"), "Oil"))
+        self.assertEqual((oil.mrp, oil.name), (Decimal("130"), "Renamed"))
+
+    def test_price_update_by_stock_no_with_new_name_and_prices(self):
+        self.post(sheet([["N-1", "Oil", "100", "60", "90", "5"]]), apply="true")
+        file = sheet(
+            [["N-1", "Engine oil 1L", "65", "95"], ["N-1x", "", "", ""]][:1],
+            header=("Stock No", "Stock Name", "Purchase Price", "Selling Price"),
+        )
+        data = self.post(file, mode="prices", apply="true").json()
+
+        self.assertTrue(data["applied"], data)
+        oil = Product.objects.get(stock_no="N-1", owner_business=self.ho)
+        self.assertEqual(
+            (oil.name, oil.purchase_price, oil.sale_price, oil.mrp),
+            ("Engine oil 1L", Decimal("65"), Decimal("95"), Decimal("95")),
+        )
+        self.assertEqual(StockBalance.objects.get(product=oil).quantity, Decimal("5"))
+
+    def test_price_update_is_refused_in_a_branch(self):
+        self.authenticate("ACME-BR", "owner")
+        r = self.post(sheet([["N-1", "x", "1", "1"]], header=("Stock No", "Stock Name", "Purchase Price", "Selling Price")), mode="prices")
+
+        self.assertIn(r.status_code, (400, 403))
 
     def test_excel_and_loose_header_names_work(self):
         data = self.post(
