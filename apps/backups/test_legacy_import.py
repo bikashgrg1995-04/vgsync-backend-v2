@@ -160,5 +160,10 @@ class StockLabelTests(SimpleTestCase):
 
     def test_real_codes_are_left_alone(self):
         self.assertEqual(self.fix("HEAVY 20W", "Gulf Fork Oil"), ("HEAVY 20W", "Gulf Fork Oil"))
-        self.assertEqual(self.fix("44191-34J00-YSF (Blue)", "COVER"), ("44191-34J00-YSF (Blue)", "COVER"))
+        self.assertEqual(self.fix("13400-02L20-000", "AIR CLEANER"), ("13400-02L20-000", "AIR CLEANER"))
+        self.assertEqual(self.fix("99000F10546C000", "KIT"), ("99000F10546C000", "KIT"))
+
+    def test_dashed_code_with_a_colour_note(self):
+        self.assertEqual(self.fix("44191-34J00-YSF (Blue)", "COVER, FUEL TANK CENTER (BLUE)"),
+                         ("44191-34J00-YSF", "COVER, FUEL TANK CENTER (BLUE)"))
         self.assertEqual(self.fix("36030072", "Spacer"), ("36030072", "Spacer"))

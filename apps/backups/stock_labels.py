@@ -14,7 +14,8 @@ it is joined without a space, judged from the words found in the other names.
 import re
 from collections import Counter
 
-CODE = re.compile(r"^(\d{6,}[0-9A-Za-z\-/.]*) (\S.*)$")
+# A real stock number is 8 digits (36030069) or like 13400-02L20-000.
+CODE = re.compile(r"^(\d{8}|\d{5}-[0-9A-Za-z]{4,5}-[0-9A-Za-z]{2,4}) (\S.*)$")
 CONNECTORS = {"for", "with", "and", "of", "rh", "lh", "to", "in"}
 
 
@@ -51,6 +52,9 @@ def fix_label(stock_no, name, words):
 
     if not name:
         return code, tail
+
+    if tail.strip("() ").lower() in name.lower():
+        return code, name  # the name already says it ("(Blue)" ... "(BLUE)")
 
     if name[0] in ",.;:)]":
         return code, tail + name
