@@ -1,5 +1,8 @@
 import json
 
+from collections import Counter
+
+from django.test import SimpleTestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from apps.backups.models import BackupLog
@@ -131,3 +134,31 @@ class LegacyImportTests(TenantTestMixin, APITestCase):
         r = self.client.post(URL + "legacy-preview/", {"file": bad}, format="multipart")
 
         self.assertEqual(r.status_code, 400)
+
+
+class StockLabelTests(SimpleTestCase):
+    def fix(self, no, name, vocab=()):
+        from apps.backups import stock_labels
+
+        return stock_labels.fix_label(no, name, Counter(vocab))
+
+    def test_the_reported_example(self):
+        self.assertEqual(self.fix("36030072 Spacer", "- 4.057 mm"), ("36030072", "Spacer - 4.057 mm"))
+
+    def test_cut_inside_a_word_is_joined(self):
+        self.assertEqual(self.fix("32010067 FRICTI", "ON PLATE [165FC00129]"),
+                         ("32010067", "FRICTION PLATE [165FC00129]"))
+        self.assertEqual(self.fix("35080004 Batter", "y Cable +ve"), ("35080004", "Battery Cable +ve"))
+
+    def test_cut_on_a_space_and_nan_names(self):
+        self.assertEqual(self.fix("22071003 CLAMP", "BELLOW"), ("22071003", "CLAMP BELLOW"))
+        self.assertEqual(self.fix("27040526 PIN", "nan"), ("27040526", "PIN"))
+        self.assertEqual(self.fix("27040940 Wheel", "Cyl. Assembly"), ("27040940", "Wheel Cyl. Assembly"))
+
+    def test_comma_stays_attached(self):
+        self.assertEqual(self.fix("36010106 GASKET", ", CRANKCASE"), ("36010106", "GASKET, CRANKCASE"))
+
+    def test_real_codes_are_left_alone(self):
+        self.assertEqual(self.fix("HEAVY 20W", "Gulf Fork Oil"), ("HEAVY 20W", "Gulf Fork Oil"))
+        self.assertEqual(self.fix("44191-34J00-YSF (Blue)", "COVER"), ("44191-34J00-YSF (Blue)", "COVER"))
+        self.assertEqual(self.fix("36030072", "Spacer"), ("36030072", "Spacer"))

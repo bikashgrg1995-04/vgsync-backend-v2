@@ -17,6 +17,7 @@ copy first.
 
 import json
 import re
+
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -24,6 +25,8 @@ from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
+
+from apps.backups import stock_labels
 
 NEPAL = ZoneInfo("Asia/Kathmandu")
 MAX_BYTES = 40 * 1024 * 1024
@@ -118,9 +121,19 @@ def _product_rows(grouped):
     """Products by old pk; a stock number used twice becomes one product."""
     categories = {c["pk"]: c["fields"]["name"] for c in grouped.get("core.category", [])}
     by_no, pk_to_no, warnings = {}, {}, []
+    stock_rows = grouped.get("core.stock", [])
+    words = stock_labels.vocabulary((r["fields"]["item_no"], r["fields"]["name"]) for r in stock_rows)
+    repaired = 0
 
-    for row in grouped.get("core.stock", []):
-        f = row["fields"]
+    for row in stock_rows:
+        f = dict(row["fields"])
+        fixed_no, fixed_name = stock_labels.fix_label(f["item_no"], f["name"], words)
+
+        if fixed_no != str(f["item_no"] or "").strip():
+            repaired += 1
+
+        f["item_no"], f["name"] = fixed_no, fixed_name
+        f["model"] = "" if str(f.get("model") or "").lower() == "nan" else f.get("model")
         number = _clip(f["item_no"], 100)
         key = number.lower()
 
@@ -164,6 +177,13 @@ def _product_rows(grouped):
             }
 
         pk_to_no[row["pk"]] = key
+
+    if repaired:
+        warnings.insert(
+            0,
+            f"{repaired} stock numbers had the item name stuck on the end (the old system cut "
+            "them after 15 characters); the number and the name were separated again.",
+        )
 
     return by_no, pk_to_no, warnings
 
