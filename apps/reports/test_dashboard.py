@@ -124,3 +124,32 @@ class DashboardTests(TenantTestMixin, APITestCase):
 
         rbac.write_position_codes(position, {"dashboard.view"})
         self.assertEqual(self.client.get(URL).status_code, 200)
+
+
+class DashboardOverviewTests(TenantTestMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.authenticate("ACME-HO", "owner")
+
+    def test_overview_blocks_and_range(self):
+        data = self.client.get(URL, {"days": "7"}).json()
+
+        self.assertEqual(data["overview"]["days"], 7)
+
+        for name in ("sales", "purchases", "income", "expenses"):
+            self.assertEqual(len(data["overview"][name]["series"]), 7)
+            self.assertIn("change_pct", data["overview"][name])
+
+        self.assertEqual(len(data["overview"]["labels"]), 7)
+        self.assertEqual(self.client.get(URL, {"days": "5"}).json()["overview"]["days"], 30)
+
+    def test_due_lists_and_activity_exist(self):
+        data = self.client.get(URL).json()
+
+        for key in ("installments", "purchase_credit", "sales_credit"):
+            self.assertIn("amount" if "credit" in key else "count", data["due"][key])
+
+        self.assertIn("count", data["due"]["servicing"])
+        self.assertIsInstance(data["installments"], list)
+        self.assertIsInstance(data["servicing"], list)
+        self.assertIsInstance(data["activity"], list)

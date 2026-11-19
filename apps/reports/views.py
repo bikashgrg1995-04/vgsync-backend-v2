@@ -278,6 +278,7 @@ class DashboardView(APIView):
                 request.user,
                 request.access_mode,
                 timezone.localdate(),
+                dashboard.overview.parse_days(request.query_params.get("days")),
             )
         )
 

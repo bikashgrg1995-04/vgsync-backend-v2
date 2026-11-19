@@ -16,7 +16,7 @@ from apps.inventory.models import StockBalance
 from apps.purchases.models import Purchase
 from apps.sales.models import Sale
 
-from . import queries
+from . import overview, queries
 from .queries import ZERO, money
 
 
@@ -136,7 +136,7 @@ def _branch_overview(company_id, today):
     ]
 
 
-def owner_dashboard(business, user, access_mode, today=None):
+def owner_dashboard(business, user, access_mode, today=None, days=30):
     today = today or datetime.date.today()
     month_start = today.replace(day=1)
     since = today - datetime.timedelta(days=29)
@@ -201,6 +201,11 @@ def owner_dashboard(business, user, access_mode, today=None):
         "approvals_pending": pending,
         "staff": _staff(business),
         "alerts": alerts,
+        "overview": overview.period_overview(business, today, days),
+        "due": overview.due_soon(business, today),
+        "installments": overview.installments_list(business, today),
+        "servicing": overview.servicing_list(business, today),
+        "activity": overview.recent_activity(business),
     }
 
     # Head Office sees its branches, never edits them from here.
