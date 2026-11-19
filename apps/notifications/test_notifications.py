@@ -344,7 +344,7 @@ class SupplierPaymentAlertTests(NotificationTestCase):
         first = Notification.objects.order_by("id").first()
         self.assertIn("Himal Traders", first.title)
         self.assertIn("due in 3 days", first.title)
-        self.assertIn("/dashboard/purchase/detail?id=", first.link)
+        self.assertIn("/purchase/detail?id=", first.link)
 
     def test_nothing_before_the_window_or_before_the_goods_arrive(self):
         from apps.notifications.services import generate_payables

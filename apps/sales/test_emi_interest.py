@@ -156,7 +156,7 @@ class BikeAccessTests(BikeTestCase):
 
         alerts = emi_alerts("manager")
         self.assertTrue(alerts)
-        self.assertEqual(alerts[0]["link"], f"/dashboard/sales/detail?id={self.sale['id']}")
+        self.assertEqual(alerts[0]["link"], f"/sales/detail?id={self.sale['id']}")
         self.assertEqual(emi_alerts("plain"), [])
         # A viewer may look at the schedule but is not the one chasing it.
         self.assertEqual(emi_alerts("viewer"), [])

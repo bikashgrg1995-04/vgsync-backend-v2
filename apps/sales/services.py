@@ -1372,7 +1372,7 @@ def assign_technician(*, sale, technician, by):
             Notification.Kind.JOB_ASSIGNED,
             f"New job: {sale.sale_no}",
             "A service job was given to you.",
-            link="/dashboard/my-jobs",
+            link="/my-jobs",
         )
 
     return sale
@@ -1471,7 +1471,7 @@ def _notify_office(sale, title, body):
     if person is not None and person != sale.technician:
         notify(
             sale.business, person, Notification.Kind.JOB_LINE_REQUESTED,
-            title, body, link=f"/dashboard/sales/detail/?id={sale.pk}",
+            title, body, link=f"/sales/detail/?id={sale.pk}",
         )
 
 
@@ -1541,7 +1541,7 @@ def _tell_technician(line, title, body):
     if line.requested_by_id:
         notify(
             line.sale.business, line.requested_by, Notification.Kind.JOB_LINE_DECIDED,
-            title, body, link="/dashboard/my-jobs",
+            title, body, link="/my-jobs",
         )
 
 

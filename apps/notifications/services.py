@@ -87,7 +87,7 @@ def generate_payables(business, today=None):
                 "title": f"Supplier payment {when}: {purchase.supplier.name}"[:200],
                 "body": f"{purchase.purchase_no}, {owed:.2f} left to pay"[:300],
                 "due_date": purchase.due_date,
-                "link": f"/dashboard/purchase/detail?id={purchase.pk}",
+                "link": f"/purchase/detail?id={purchase.pk}",
             },
         )
         made += created
@@ -134,7 +134,7 @@ def generate_for_business(business, today=None):
                 "due_date": followup.due_date,
                 # An instalment opens its sale, where the schedule is.
                 "link": (
-                    f"/dashboard/sales/detail?id={followup.sale_id}"
+                    f"/sales/detail?id={followup.sale_id}"
                     if followup.kind
                     in (
                         Followup.Kind.EMI_DUE,

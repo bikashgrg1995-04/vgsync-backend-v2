@@ -20,7 +20,7 @@ def _name(user):
 
 
 def _link(task):
-    return f"/dashboard/tasks?id={task.pk}"
+    return f"/tasks?id={task.pk}"
 
 
 def _event(task, actor, kind, **extra):
