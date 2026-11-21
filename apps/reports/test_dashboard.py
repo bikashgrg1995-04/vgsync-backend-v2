@@ -12,6 +12,16 @@ URL = "/api/v1/reports/dashboard/"
 
 
 class DashboardTests(TenantTestMixin, APITestCase):
+    def test_get_answers_carry_an_etag_and_unchanged_data_gets_304(self):
+        # The web app keeps a local copy and asks "did it change?" with If-None-Match.
+        self.authenticate("ACME-HO", "owner")
+        first = self.client.get(URL)
+        etag = first["ETag"]
+        self.assertTrue(etag)
+        again = self.client.get(URL, HTTP_IF_NONE_MATCH=etag)
+        self.assertEqual(again.status_code, 304)
+        self.assertEqual(again.content, b"")
+
     def test_an_empty_business_returns_zeros_not_errors(self):
         self.authenticate("ACME-HO", "owner")
 

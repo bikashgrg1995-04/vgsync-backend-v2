@@ -70,6 +70,9 @@ MIDDLEWARE = [
     # (such as CommonMiddleware) so CORS headers are added to them.
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
+    # Adds an ETag to GET responses and answers 304 when the app already has the
+    # same data, so the web app can keep a local copy and only fetch real changes.
+    'django.middleware.http.ConditionalGetMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.audit.middleware.AuditContextMiddleware',
@@ -272,6 +275,11 @@ CORS_ALLOWED_ORIGINS = [
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+# The web app sends If-None-Match and reads ETag to keep its local copy fresh.
+from corsheaders.defaults import default_headers  # noqa: E402
+
+CORS_ALLOW_HEADERS = [*default_headers, "if-none-match"]
+CORS_EXPOSE_HEADERS = ["ETag", "Content-Disposition"]
 
 
 # API Documentation
