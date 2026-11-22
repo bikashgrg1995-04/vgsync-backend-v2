@@ -6,6 +6,7 @@ position) can manage other staff, within limits.
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
+from apps.accounts.scope import scoped_positions
 from apps.common.testing import TenantTestMixin
 
 STAFF_URL = "/api/v1/staff/"
@@ -153,6 +154,23 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         self.assertNotIn("admin1", usernames)
         self.assertNotIn("boss", usernames)
         self.assertNotIn("acct", usernames)
+
+    def test_position_list_says_how_many_positions_are_hidden_from_the_admin(self):
+        self.as_user("admin1")
+        data = self.client.get("/api/v1/positions/").data
+        shown = {row["id"] for row in data["results"]}
+
+        self.assertIn(self.admin_pos.pk, shown)
+        self.assertNotIn(self.boss_pos.pk, shown)
+        total = len(scoped_positions(self.ho))
+        self.assertEqual(data["hidden_count"], total - len(shown))
+        self.assertGreater(data["hidden_count"], 0)
+
+    def test_owner_sees_every_position_and_none_hidden(self):
+        self.as_user("owner")
+        data = self.client.get("/api/v1/positions/").data
+
+        self.assertEqual(data["hidden_count"], 0)
 
     # ---- the limits
 

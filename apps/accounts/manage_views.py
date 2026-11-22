@@ -374,6 +374,22 @@ class PositionViewSet(viewsets.ModelViewSet):
             )
         )
 
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+
+        # Tell a delegated administrator how many positions of this business are not
+        # shown because they grant more access than their own, so a missing position
+        # is explained rather than mysterious. The owner sees everything: always 0.
+        hidden = 0
+        if request.user.role != User.Role.OWNER:
+            total = scoped_positions(request.active_business).count()
+            shown = len(manageable_position_ids(request.user, request.active_business))
+            hidden = max(total - shown, 0)
+        if isinstance(response.data, dict):
+            response.data["hidden_count"] = hidden
+
+        return response
+
     def destroy(self, request, *args, **kwargs):
         position = self.get_object()
 
