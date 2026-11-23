@@ -55,6 +55,20 @@ class TokenLifecycleTests(APITestCase):
             self.logout_url, {"refresh": token}, format="json"
         )
 
+    # -- last login -----------------------------------------------------
+
+    def test_successful_login_records_last_login(self):
+        self.assertIsNone(User.objects.get(pk=self.owner.pk).last_login)
+
+        self.assertEqual(self.login().status_code, 200)
+
+        self.assertIsNotNone(User.objects.get(pk=self.owner.pk).last_login)
+
+    def test_failed_login_does_not_record_last_login(self):
+        self.assertEqual(self.login(password="wrong-pass").status_code, 400)
+
+        self.assertIsNone(User.objects.get(pk=self.owner.pk).last_login)
+
     # -- rotation -------------------------------------------------------
 
     def test_refresh_returns_a_new_refresh_token(self):
