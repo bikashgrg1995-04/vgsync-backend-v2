@@ -91,7 +91,7 @@ class MultiPositionTests(TenantTestMixin, APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(len(response.data["extra_positions"]), 2)
 
-    def test_a_delegated_admin_cannot_hand_out_a_position_above_them(self):
+    def test_a_delegated_admin_cannot_hand_out_positions_at_all(self):
         adm_pos = self.make_position(self.ho, "Admin")
         rbac.write_position_codes(adm_pos, {"staff.view", "staff.assign_position", "staff.update", "sales.view"})
         self.make_user("adm", User.Role.STAFF, company=self.company, position=adm_pos)
@@ -100,4 +100,4 @@ class MultiPositionTests(TenantTestMixin, APITestCase):
             f"{STAFF}{self.person.pk}/", {"extra_positions": [self.buy_pos.pk]}, format="json"
         )
 
-        self.assertIn(response.status_code, (400, 404), response.data)
+        self.assertIn(response.status_code, (403, 404), response.data)

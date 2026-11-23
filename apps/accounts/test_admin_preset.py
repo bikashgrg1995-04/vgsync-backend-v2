@@ -55,8 +55,17 @@ class AdministratorTests(TenantTestMixin, APITestCase):
         for url in (AUDIT, RULES):
             self.assertEqual(self.client.get(url).status_code, 403, url)
 
-    def test_admin_creates_a_position_within_own_access(self):
+    def test_admin_cannot_create_positions_only_the_owner_can(self):
         self.authenticate("ACME-HO", "adm")
+
+        for codes in (["sales.view", "sales.create"], ["staff.pay"], ["staff.manage_permissions"]):
+            response = self.client.post(
+                POSITIONS, {"name": "Counter", "codes": codes}, format="json"
+            )
+            self.assertEqual(response.status_code, 403, codes)
+
+    def test_owner_creates_a_position(self):
+        self.authenticate("ACME-HO", "owner")
 
         response = self.client.post(
             POSITIONS,
@@ -65,15 +74,6 @@ class AdministratorTests(TenantTestMixin, APITestCase):
         )
 
         self.assertEqual(response.status_code, 201, response.data)
-
-    def test_admin_cannot_grant_more_than_they_hold(self):
-        self.authenticate("ACME-HO", "adm")
-
-        for code in ("staff.pay", "staff.manage_permissions"):
-            response = self.client.post(
-                POSITIONS, {"name": "Sneaky", "codes": [code]}, format="json"
-            )
-            self.assertEqual(response.status_code, 400, code)
 
     def test_plain_staff_cannot_create_positions(self):
         self.authenticate("ACME-HO", "plain")

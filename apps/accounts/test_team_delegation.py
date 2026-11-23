@@ -120,29 +120,37 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
 
     # ---- what a delegated administrator can do
 
-    def test_admin_creates_edits_resets_and_deactivates_staff(self):
+    def test_admin_can_read_staff_but_only_the_owner_changes_them(self):
         self.as_user("admin1")
+
+        self.assertEqual(self.client.get(STAFF_URL).status_code, 200)
+
+        # Creating, editing, resetting, deactivating and reactivating are the owner's alone.
+        self.assertEqual(self.create().status_code, 403)
+        url = f"{STAFF_URL}{self.cashier.pk}/"
+        self.assertEqual(self.client.patch(url, {"phone": "9800000000"}, format="json").status_code, 403)
+        self.assertEqual(self.client.post(f"{url}reset-password/", {}, format="json").status_code, 403)
+        self.assertEqual(self.client.delete(url).status_code, 403)
+        self.assertEqual(self.client.post(f"{url}reactivate/", {}, format="json").status_code, 403)
+        self.assertTrue(User.objects.get(pk=self.cashier.pk).is_active)
+
+    def test_owner_creates_edits_resets_and_deactivates_staff(self):
+        self.as_user("owner")
 
         created = self.create()
         self.assertEqual(created.status_code, 201, created.data)
         pk = created.data["id"]
         self.assertIn("temporary_password", created.data)
 
-        edited = self.client.patch(
-            f"{STAFF_URL}{pk}/", {"phone": "9800000000"}, format="json"
-        )
+        edited = self.client.patch(f"{STAFF_URL}{pk}/", {"phone": "9800000000"}, format="json")
         self.assertEqual(edited.status_code, 200, edited.data)
 
         reset = self.client.post(f"{STAFF_URL}{pk}/reset-password/", {}, format="json")
         self.assertEqual(reset.status_code, 200, reset.data)
-        self.assertIn("temporary_password", reset.data)
 
-        gone = self.client.delete(f"{STAFF_URL}{pk}/")
-        self.assertEqual(gone.status_code, 204)
+        self.assertEqual(self.client.delete(f"{STAFF_URL}{pk}/").status_code, 204)
         self.assertFalse(User.objects.get(pk=pk).is_active)
-
-        back = self.client.post(f"{STAFF_URL}{pk}/reactivate/", {}, format="json")
-        self.assertEqual(back.status_code, 200, back.data)
+        self.assertEqual(self.client.post(f"{STAFF_URL}{pk}/reactivate/", {}, format="json").status_code, 200)
 
     def test_admin_lists_only_staff_within_their_own_level(self):
         self.as_user("admin1")
@@ -174,23 +182,17 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
 
     # ---- the limits
 
-    def test_admin_cannot_assign_a_position_with_more_access(self):
+    def test_admin_cannot_assign_a_position_at_all(self):
         self.as_user("admin1")
 
-        response = self.create(position=self.boss_pos.pk)
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("position", response.data)
-
+        self.assertEqual(self.create(position=self.boss_pos.pk).status_code, 403)
         promote = self.client.patch(
-            f"{STAFF_URL}{self.cashier.pk}/",
-            {"position": self.boss_pos.pk},
-            format="json",
+            f"{STAFF_URL}{self.cashier.pk}/", {"position": self.boss_pos.pk}, format="json"
         )
-        self.assertEqual(promote.status_code, 400)
+        self.assertEqual(promote.status_code, 403)
 
     def test_admin_and_accountant_are_no_longer_roles(self):
-        self.as_user("admin1")
+        self.as_user("owner")
 
         response = self.create(role="accountant", position=None)
         self.assertEqual(response.status_code, 400)
@@ -201,18 +203,13 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         )
         self.assertEqual(promote.status_code, 400)
 
-    def test_admin_cannot_touch_more_powerful_staff_or_themselves(self):
+    def test_admin_cannot_see_or_touch_more_powerful_staff_or_themselves(self):
         self.as_user("admin1")
 
         for target in (self.boss, self.admin, self.accountant):
             url = f"{STAFF_URL}{target.pk}/"
             self.assertEqual(self.client.get(url).status_code, 404, target.username)
-            self.assertEqual(self.client.delete(url).status_code, 404, target.username)
-            self.assertEqual(
-                self.client.post(f"{url}reset-password/", {}, format="json").status_code,
-                404,
-                target.username,
-            )
+            self.assertIn(self.client.delete(url).status_code, (403, 404), target.username)
 
         self.assertTrue(User.objects.get(pk=self.boss.pk).is_active)
 

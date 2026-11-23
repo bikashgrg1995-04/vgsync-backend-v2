@@ -19,7 +19,7 @@ from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.response import Response
 
 from apps.common.exceptions import Conflict
-from apps.common.permissions import CanManageTeam, IsOwner, OwnerOrPermission
+from apps.common.permissions import CanManageTeam, IsOwner
 
 from . import rbac
 from .manage_serializers import (
@@ -61,8 +61,14 @@ class StaffViewSet(viewsets.ModelViewSet):
     }
 
     def get_permissions(self):
-        # Changing someone's permissions is reserved for the owner.
-        if self.action == "access" and self.request.method == "PUT":
+        # Creating, editing, deactivating, reactivating and resetting the password of
+        # staff, and changing anyone's permissions, is reserved for the owner. Everyone
+        # else with staff access (a delegated administrator) can only read.
+        # Documents keep their own rules.
+        if (
+            self.request.method not in ("GET", "HEAD", "OPTIONS")
+            and self.action not in ("documents", "document")
+        ):
             return [IsOwner()]
 
         return super().get_permissions()
@@ -339,14 +345,11 @@ class PositionViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         # Reading is shared with delegated administrators (they need the list
-        # to assign positions); changing positions stays with the owner.
+        # to see positions); creating and changing positions is the owner's alone.
         if self.request.method in ("GET", "HEAD", "OPTIONS"):
             return [CanManageTeam()]
 
-        return [OwnerOrPermission()]
-
-    # Writes: the owner, or staff holding ``staff.manage_positions``.
-    write_permission = "staff.manage_positions"
+        return [IsOwner()]
 
     filterset_fields = ("is_active",)
     search_fields = ("name", "description")
