@@ -106,6 +106,10 @@ def summary(staff, profile, bal):
         "advance": bal["advance"],
         "cycle_start": bal["cycle_start"],
         "next_salary_date": bal["next_salary_date"],
+        "next_salary_amount": (
+            profile.rate + profile.allowances
+            if profile.pay_type == "monthly" else None
+        ),
         "last_payment_date": bal["last_payment_date"],
     }
 

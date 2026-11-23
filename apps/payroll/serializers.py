@@ -317,6 +317,7 @@ class BalanceSerializer(serializers.Serializer):
     advance = MoneyField()
     cycle_start = serializers.DateField()
     next_salary_date = serializers.DateField(allow_null=True)
+    next_salary_amount = MoneyField(allow_null=True, required=False)
     last_payment_date = serializers.DateField(allow_null=True)
 
 
