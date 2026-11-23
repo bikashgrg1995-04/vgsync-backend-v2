@@ -1,3 +1,4 @@
+import logging
 
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
@@ -545,7 +546,7 @@ class ForgotPasswordSerializer(serializers.Serializer):
         )
         minutes = max(settings.PASSWORD_RESET_TIMEOUT // 60, 1)
 
-        send_mail(
+        sent = send_mail(
             subject="Reset your VGSync password",
             message=(
                 f"Hello {user.first_name or user.username},\n\n"
@@ -560,6 +561,11 @@ class ForgotPasswordSerializer(serializers.Serializer):
             recipient_list=[user.email],
             fail_silently=True,
         )
+        if not sent:
+            logging.getLogger(__name__).error(
+                "Password reset email to user %s was not sent. Check the "
+                "EMAIL_* settings and the mail server.", user.pk,
+            )
 
         return True
 
