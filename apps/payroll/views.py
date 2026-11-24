@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from apps.accounts.scope import scoped_users
 from apps.common.pagination import StandardPagination
-from apps.common.permissions import IsOwner, OwnerOrPermission
+from apps.common.permissions import IsOwner
 
 from .models import (
     IncentiveRule,
@@ -121,8 +121,7 @@ def summary(staff, profile, bal):
 class SalaryListView(generics.ListAPIView):
     """How each team member is paid."""
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
     serializer_class = SalaryProfileSerializer
     filterset_fields = ("pay_type",)
     search_fields = ("user__username", "user__first_name", "user__last_name")
@@ -138,8 +137,7 @@ class SalaryListView(generics.ListAPIView):
 class SalaryDetailView(APIView):
     """``GET`` a team member's pay setup, or ``PUT`` to set or change it."""
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
 
     def _staff(self, request, staff_id):
         return get_object_or_404(
@@ -199,8 +197,7 @@ class BalanceListView(APIView):
     ``pay_type``, ``search``.
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
 
     def get(self, request):
         staff_qs = scoped_users(request.active_business)
@@ -325,8 +322,7 @@ def statement_response(request, staff):
 class BalanceDetailView(APIView):
     """One person's account, with each unsettled amount listed."""
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
 
     def get(self, request, staff_id):
         staff = get_object_or_404(
@@ -344,8 +340,7 @@ class StatementView(APIView):
     (or paid ahead as an advance) after each line.
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
 
     def get(self, request, staff_id):
         staff = get_object_or_404(
@@ -386,9 +381,7 @@ class PayrollEntryViewSet(viewsets.ModelViewSet):
     when the salary day comes). Entries are voided, not deleted.
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
-    write_permission = "staff.pay"
+    permission_classes = [IsOwner]
     serializer_class = PayrollEntrySerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
 
@@ -435,9 +428,7 @@ class PayrollPaymentViewSet(viewsets.ModelViewSet):
     salary expense. A payment cannot be edited; void it and add a new one.
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
-    write_permission = "staff.pay"
+    permission_classes = [IsOwner]
     serializer_class = PayrollPaymentSerializer
     http_method_names = ["get", "post", "head", "options"]
 
@@ -564,9 +555,7 @@ class WorkSheetView(APIView):
     mark for the day, and ``POST`` saves marks for several people at once.
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
-    write_permission = "staff.pay"
+    permission_classes = [IsOwner]
 
     def _day(self, request):
         from datetime import date as _date
@@ -617,8 +606,7 @@ class WorkSheetView(APIView):
 class StaffAttendanceView(APIView):
     """``GET workdays/staff/<id>/?month=YYYY-MM`` — one person's marks for a month."""
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
 
     def get(self, request, staff_id):
         from calendar import monthrange
@@ -686,8 +674,7 @@ def _month(request):
 class IncentiveRuleViewSet(viewsets.ModelViewSet):
     """How incentives are worked out. Anyone who may see pay can read them; only the owner changes them."""
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
+    permission_classes = [IsOwner]
     serializer_class = IncentiveRuleSerializer
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
@@ -708,9 +695,7 @@ class IncentiveView(APIView):
     ``POST {month, staff?}``: put it in their pay as a bonus (once per month).
     """
 
-    permission_classes = [OwnerOrPermission]
-    read_permission = "staff.pay_view"
-    write_permission = "staff.pay"
+    permission_classes = [IsOwner]
 
     def get(self, request):
         month = _month(request)

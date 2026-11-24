@@ -126,7 +126,7 @@ class IncentiveTests(BikeTestCase):
         self.make_user("acc", User.Role.STAFF, company=self.company, position=acc_pos)
         self.authenticate("ACME-HO", "acc")
 
-        self.assertEqual(self.client.get(RULES).status_code, 200)
+        self.assertEqual(self.client.get(RULES).status_code, 403)
         self.assertEqual(
             self.client.post(RULES, {"name": "x", "basis": "bike_fixed", "value": "10"}, format="json").status_code,
             403,

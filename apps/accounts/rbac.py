@@ -113,6 +113,9 @@ CATALOG = {
 # Administrator Position never becomes equivalent to ownership.
 RESERVED = frozenset({
     "staff.manage_permissions",
+    # Salaries and pay records: the owner only.
+    "staff.pay_view",
+    "staff.pay",
 })
 
 # What colleagues earn and are paid. Not part of the Administrator preset.
@@ -234,7 +237,6 @@ PRESETS = {
             "bike_sales": ["view"],
             "purchases": ["view", "pay"],
             "inventory": ["view", "view_cost"],
-            "staff": ["pay_view", "pay"],
             "reminders": ["view"],
         },
     },

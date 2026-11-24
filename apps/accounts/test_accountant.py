@@ -34,12 +34,13 @@ class AccountantTests(TenantTestMixin, APITestCase):
 
         for code in (
             "finance.reconcile", "sales.collect", "purchases.pay",
-            "staff.pay_view", "staff.pay",
         ):
             self.assertIn(code, codes)
 
         self.assertNotIn("sales.create", codes)
         self.assertNotIn("staff.update", codes)
+        self.assertNotIn("staff.pay_view", codes)
+        self.assertNotIn("staff.pay", codes)
 
     def test_accountant_reconciles_cash_and_bank(self):
         self.authenticate("ACME-HO", "acc")
@@ -53,40 +54,24 @@ class AccountantTests(TenantTestMixin, APITestCase):
         self.assertEqual(self.client.get(BALANCES).status_code, 403)
         self.assertEqual(self.client.get(RECONCILE).status_code, 403)
 
-    def test_accountant_sees_and_records_pay_but_cannot_set_rates(self):
-        self.authenticate("ACME-HO", "acc")
+    def test_payroll_is_owner_only(self):
+        for who in ("acc", "viewer"):
+            self.authenticate("ACME-HO", who)
 
-        self.assertEqual(self.client.get(SALARIES).status_code, 200)
-        self.assertEqual(self.client.get(PAYROLL_REPORT).status_code, 200)
-        self.assertEqual(self.client.get(PAYROLL_PAYMENTS).status_code, 200)
-        # Allowed to try (bad body -> 400), never 403.
-        self.assertEqual(
-            self.client.post(PAYROLL_PAYMENTS, {}, format="json").status_code, 400
-        )
-        self.assertEqual(
-            self.client.put(f"{SALARIES}{self.acc.pk}/", {}, format="json").status_code,
-            403,
-        )
+            self.assertEqual(self.client.get(SALARIES).status_code, 403)
+            self.assertEqual(self.client.get(PAYROLL_REPORT).status_code, 403)
+            self.assertEqual(self.client.get(PAYROLL_PAYMENTS).status_code, 403)
+            self.assertEqual(
+                self.client.post(PAYROLL_PAYMENTS, {}, format="json").status_code, 403
+            )
+            self.assertEqual(
+                self.client.put(f"{SALARIES}{self.acc.pk}/", {}, format="json").status_code,
+                403,
+            )
 
-    def test_others_cannot_see_or_pay_salaries(self):
-        self.authenticate("ACME-HO", "viewer")
-
-        self.assertEqual(self.client.get(SALARIES).status_code, 403)
-        self.assertEqual(self.client.get(PAYROLL_REPORT).status_code, 403)
-        self.assertEqual(
-            self.client.post(PAYROLL_PAYMENTS, {}, format="json").status_code, 403
-        )
-
-    def test_pay_view_alone_cannot_record(self):
-        pos = self.make_position(self.ho, "PayReader")
-        rbac.write_position_codes(pos, {"staff.pay_view"})
-        self.make_user("pr", User.Role.STAFF, company=self.company, position=pos)
-        self.authenticate("ACME-HO", "pr")
-
-        self.assertEqual(self.client.get(SALARIES).status_code, 200)
-        self.assertEqual(
-            self.client.post(PAYROLL_PAYMENTS, {}, format="json").status_code, 403
-        )
+    def test_pay_codes_cannot_be_granted(self):
+        self.assertIn("staff.pay_view", rbac.RESERVED)
+        self.assertIn("staff.pay", rbac.RESERVED)
 
     def test_collector_may_record_a_payment_a_viewer_may_not(self):
         self.authenticate("ACME-HO", "acc")

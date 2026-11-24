@@ -240,11 +240,7 @@ class PayrollSummaryView(OwnerReport):
     def get(self, request):
         # Salaries are the owner's business; a reports.view position must
         # not be able to read what colleagues earn.
-        if request.user.role != User.Role.OWNER and not rbac.has_permission(
-            request.user,
-            "staff.pay_view",
-            getattr(request, "access_mode", "full"),
-        ):
+        if request.user.role != User.Role.OWNER:
             raise PermissionDenied("You cannot see payroll.")
 
         date_from, date_to = _range(request)
