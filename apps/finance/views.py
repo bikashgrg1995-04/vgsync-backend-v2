@@ -7,8 +7,6 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.approvals.models import Kind
-from apps.approvals.services import gate
 
 from apps.common.dates import parse_query_date
 from apps.common.exceptions import Conflict
@@ -51,13 +49,6 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         return Expense.objects.filter(business=self.request.active_business)
 
     def perform_create(self, serializer):
-        gate(
-            self.request,
-            Kind.EXPENSE,
-            serializer.validated_data["amount"],
-            f"Expense: {serializer.validated_data.get('description', '')}",
-        )
-
         serializer.save(
             business=self.request.active_business,
             created_by=self.request.user,

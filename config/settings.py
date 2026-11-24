@@ -58,7 +58,6 @@ INSTALLED_APPS = [
     "apps.notifications.apps.NotificationsConfig",
     "apps.finance.apps.FinanceConfig",
     "apps.support.apps.SupportConfig",
-    "apps.approvals.apps.ApprovalsConfig",
     "apps.backups.apps.BackupsConfig",
     "apps.tasks.apps.TasksConfig",
 ]

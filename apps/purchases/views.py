@@ -26,8 +26,6 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.approvals.models import Kind
-from apps.approvals.services import gate
 from apps.common.permissions import HasActiveBusinessContext, HasModulePermission
 
 from .models import (
@@ -417,7 +415,7 @@ class PurchaseViewSet(PurchaseBaseViewSet):
         Read order lines from an Excel or CSV file (Stock No, Quantity and an
         optional Unit Price, which defaults to the product's purchase price).
         Nothing is saved: the lines come back for the form to create a draft
-        purchase through the normal create, with its approval check.
+        purchase through the normal create.
         """
         from apps.inventory.services import importing
         from apps.inventory.services.products import get_products_for_business
@@ -507,20 +505,6 @@ class PurchaseViewSet(PurchaseBaseViewSet):
 
         data = dict(serializer.validated_data)
         data.setdefault("purchase_date", timezone.localdate())
-
-        # High-value purchases wait for approval (owner-set threshold).
-        subtotal = sum(
-            (item["quantity"] * item["unit_price"] for item in data["items"]),
-            Decimal("0"),
-        )
-        after_discount = max(
-            subtotal - data.get("discount_amount", Decimal("0")), Decimal("0")
-        )
-        total = (
-            after_discount * (1 + data.get("vat_rate", Decimal("0")) / 100)
-            + data.get("freight_amount", Decimal("0"))
-        )
-        gate(request, Kind.PURCHASE, total, f"Purchase {data['supplier']}")
 
         purchase = create_purchase(
             business=request.active_business, user=request.user, **data

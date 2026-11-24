@@ -62,8 +62,6 @@ TRACKED = {
     "accounts.StaffDocument": True,
     "accounts.PositionPermission": True,
     "accounts.StaffPermissionOverride": True,
-    "approvals.ApprovalRule": True,
-    "approvals.ApprovalRequest": True,
 }
 
 

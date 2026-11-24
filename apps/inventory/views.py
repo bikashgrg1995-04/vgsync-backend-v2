@@ -19,8 +19,6 @@ from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.accounts import rbac
-from apps.approvals.models import Kind
-from apps.approvals.services import gate
 from apps.common.permissions import (
     HasActiveBusinessContext,
     HasModulePermission,
@@ -375,7 +373,7 @@ class StockMovementListCreateView(GenericAPIView):
     @staticmethod
     def _authorise_adjustment(request, data):
         """Adjusting stock, and writing it off, are their own permissions;
-        a large one waits for approval (owner-set threshold, by value)."""
+        each is checked here."""
         write_off = data["adjustment_action"] == "remove_damaged"
         code = "inventory.write_off" if write_off else "inventory.adjust"
 
@@ -383,16 +381,6 @@ class StockMovementListCreateView(GenericAPIView):
             request.user, code, request.access_mode
         ):
             raise PermissionDenied("You do not have permission to do this.")
-
-        price = getattr(data["product"], "purchase_price", None) or 0
-        value = Decimal(data["quantity"]) * Decimal(price)
-
-        gate(
-            request,
-            Kind.STOCK_WRITE_OFF if write_off else Kind.STOCK_ADJUSTMENT,
-            value,
-            f"{data['adjustment_action']} {data['quantity']} x {data['product']}",
-        )
 
     def post(self, request):
         serializer = StockMovementCreateSerializer(

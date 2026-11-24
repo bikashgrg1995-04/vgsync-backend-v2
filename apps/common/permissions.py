@@ -147,7 +147,7 @@ class HasPermission(BasePermission):
     """
     Needs one explicit code, set on the view as ``required_permission`` (or
     per action in ``required_permissions``). For endpoints that are not a
-    plain module (reports, approvals).
+    plain module (reports).
     """
 
     message = "You do not have permission to perform this action."

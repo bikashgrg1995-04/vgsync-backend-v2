@@ -34,11 +34,10 @@ class AuditLogSerializer(serializers.ModelSerializer):
         "accounts.staffpermissionoverride": ("Override set:", "Override cleared:"),
         "accounts.positionpermission": ("Access added:", "Access removed:"),
         "accounts.position": ("Position added:", "Position removed:"),
-        "approvals.approvalrule": ("Rule added:", "Rule removed:"),
     }
 
     # These changes only make sense with the record they belong to.
-    NAMED_MODELS = frozenset(MODEL_VERBS) | {"approvals.approvalrequest"}
+    NAMED_MODELS = frozenset(MODEL_VERBS)
 
     # A foreign key shown by name instead of a number.
     NAMED_FIELDS = {"position_id": "accounts.position", "user_id": "accounts.user"}
