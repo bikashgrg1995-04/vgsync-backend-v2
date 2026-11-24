@@ -444,6 +444,8 @@ class PaymentTests(PayrollTestCase):
     def test_payments_can_be_listed_and_filtered(self):
         self.monthly()
         self.daily()
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-10", "800.00")
         self.pay(self.ram, "100.00")
         self.pay(self.sita, "50.00")
 
@@ -458,6 +460,24 @@ class DailyWageTests(PayrollTestCase):
     def setUp(self):
         super().setUp()
         self.daily()
+
+    def test_daily_wage_cannot_be_paid_in_advance(self):
+        self.today(date(2026, 1, 10))
+        self.wage(self.sita, "2026-01-10", "800.00")
+
+        response = self.pay(self.sita, "1000.00")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "daily_no_advance")
+        self.assertEqual(money(self.balance(self.sita)["remaining"]), money("800"))
+
+        # Exactly what is owed can be paid.
+        self.assertEqual(self.pay(self.sita, "800.00").status_code, 201)
+
+    def test_daily_wage_with_nothing_owed_takes_no_payment(self):
+        self.today(date(2026, 1, 10))
+
+        self.assertEqual(self.pay(self.sita, "100.00").status_code, 409)
 
     def test_the_amount_is_entered_each_day(self):
         self.today(date(2026, 1, 10))

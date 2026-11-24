@@ -8,6 +8,7 @@ from django.utils.text import slugify
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
@@ -251,10 +252,23 @@ class StaffCreateSerializer(_StaffInputSerializer):
         ),
     )
 
+    # How the person is paid: ``{"pay_type": "monthly" | "daily", "rate": 30000,
+    # "salary_day": 1, "allowances": 0}``. Optional here; it can also be set later.
+    pay = serializers.DictField(write_only=True, required=False)
+
     class Meta(_StaffInputSerializer.Meta):
         fields = ("username",) + _StaffInputSerializer.Meta.fields + (
             "password",
+            "pay",
         )
+
+    def validate_pay(self, value):
+        from apps.payroll.serializers import SalaryProfileSerializer
+
+        serializer = SalaryProfileSerializer(data=value)
+        serializer.is_valid(raise_exception=True)
+
+        return serializer.validated_data
 
     def validate_username(self, value):
         value = value.strip()
@@ -338,6 +352,7 @@ class StaffCreateSerializer(_StaffInputSerializer):
             password = generate_temporary_password()
 
         extras = validated_data.pop("extra_positions", [])
+        pay = validated_data.pop("pay", None)
         user = User(**validated_data)
 
         # Company users are created from the Head Office; everyone else
@@ -357,6 +372,22 @@ class StaffCreateSerializer(_StaffInputSerializer):
             with transaction.atomic():
                 user.save()
                 user.extra_positions.set(extras)
+
+                if pay:
+                    from apps.payroll.models import SalaryProfile
+                    from apps.payroll.services import first_accrued_through
+
+                    start = pay.get("start_date") or timezone.localdate()
+                    SalaryProfile.objects.create(
+                        user=user,
+                        pay_type=pay["pay_type"],
+                        rate=pay.get("rate"),
+                        allowances=pay.get("allowances") or 0,
+                        salary_day=pay.get("salary_day") or 1,
+                        start_date=start,
+                        accrued_through=first_accrued_through(start),
+                        updated_by=self.context["request"].user,
+                    )
         except IntegrityError:
             # Lost a race with another request creating the same username.
             raise serializers.ValidationError(

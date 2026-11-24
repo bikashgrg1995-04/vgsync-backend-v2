@@ -318,6 +318,29 @@ def create_payment(*, staff, business, actor, amount, paid_on, method,
                    reference="", notes=""):
     from apps.finance.services import record_salary_expense
 
+    profile = getattr(staff, "salary_profile", None)
+
+    # Daily wage is paid for work already done, so it can never be paid ahead.
+    # Only monthly pay takes an advance.
+    if profile is not None and profile.pay_type == PayType.DAILY:
+        bal = balance(
+            profile,
+            list(PayrollEntry.objects.filter(
+                staff=staff, status=PayrollEntry.Status.ACTIVE
+            )),
+            list(PayrollPayment.objects.filter(
+                staff=staff, status=PayrollPayment.Status.ACTIVE
+            )),
+            timezone.localdate(),
+        )
+
+        if amount > bal["remaining"]:
+            raise Conflict(
+                "Daily wage is paid for work already done, not in advance. "
+                f"Owed now: {bal['remaining']:.2f}.",
+                code="daily_no_advance",
+            )
+
     payment = PayrollPayment.objects.create(
         business=business,
         staff=staff,

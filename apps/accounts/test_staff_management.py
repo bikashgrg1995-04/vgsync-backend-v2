@@ -33,6 +33,45 @@ class StaffManagementTestCase(TenantTestMixin, APITestCase):
         return self.client.post(STAFF_URL, payload, format="json")
 
 
+class PayAtCreationTests(StaffManagementTestCase):
+    """The owner chooses monthly or daily pay and sets it when adding staff."""
+
+    def test_monthly_pay_is_set_with_the_new_staff(self):
+        response = self.create_staff(
+            pay={"pay_type": "monthly", "rate": "30000.00", "salary_day": 5}
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        profile = User.objects.get(pk=response.data["id"]).salary_profile
+        self.assertEqual(profile.pay_type, "monthly")
+        self.assertEqual(profile.rate, 30000)
+        self.assertEqual(profile.salary_day, 5)
+
+    def test_daily_wage_is_set_with_the_new_staff(self):
+        response = self.create_staff(
+            pay={"pay_type": "daily", "rate": "900.00"}
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        profile = User.objects.get(pk=response.data["id"]).salary_profile
+        self.assertEqual(profile.pay_type, "daily")
+        self.assertEqual(profile.rate, 900)
+
+    def test_monthly_pay_needs_a_salary(self):
+        response = self.create_staff(pay={"pay_type": "monthly"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username="ram").exists())
+
+    def test_pay_is_still_optional(self):
+        response = self.create_staff()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(
+            hasattr(User.objects.get(pk=response.data["id"]), "salary_profile")
+        )
+
+
 class OwnerOnboardingTests(StaffManagementTestCase):
 
     def test_admin_add_form_requires_password_change_by_default(self):
