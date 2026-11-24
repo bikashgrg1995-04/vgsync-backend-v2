@@ -515,6 +515,7 @@ class PositionSerializer(serializers.ModelSerializer):
     )
     granted = serializers.SerializerMethodField()
     staff_count = serializers.SerializerMethodField()
+    members = serializers.SerializerMethodField()
 
     class Meta:
         model = Position
@@ -529,6 +530,7 @@ class PositionSerializer(serializers.ModelSerializer):
             "codes",
             "granted",
             "staff_count",
+            "members",
             "created_at",
             "updated_at",
         )
@@ -540,6 +542,43 @@ class PositionSerializer(serializers.ModelSerializer):
 
     def get_granted(self, obj):
         return sorted(rbac.position_codes(obj))
+
+    def get_members(self, obj):
+        """Who holds this position (as main or extra position), active only."""
+        people = getattr(obj, "active_primary", None)
+        extra = getattr(obj, "active_extra", None)
+
+        if people is None:
+            people = obj.users.filter(is_active=True)
+
+        if extra is None:
+            extra = obj.extra_users.filter(is_active=True)
+
+        seen, rows = set(), []
+
+        for user in [*people, *extra]:
+            if user.pk in seen:
+                continue
+
+            seen.add(user.pk)
+            rows.append({
+                "id": user.pk,
+                "name": user.get_full_name() or user.username,
+                "username": user.username,
+            })
+
+        return rows
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+
+        # What a position grants is private to the owner.
+        if request is not None and request.user.role != "owner":
+            data.pop("permissions", None)
+            data.pop("granted", None)
+
+        return data
 
     def get_staff_count(self, obj):
         count = getattr(obj, "staff_count", None)

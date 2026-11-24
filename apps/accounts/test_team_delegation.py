@@ -6,7 +6,6 @@ position) can manage other staff, within limits.
 from rest_framework.test import APITestCase
 
 from apps.accounts.models import User
-from apps.accounts.scope import scoped_positions
 from apps.common.testing import TenantTestMixin
 
 STAFF_URL = "/api/v1/staff/"
@@ -152,27 +151,67 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         self.assertFalse(User.objects.get(pk=pk).is_active)
         self.assertEqual(self.client.post(f"{STAFF_URL}{pk}/reactivate/", {}, format="json").status_code, 200)
 
-    def test_admin_lists_only_staff_within_their_own_level(self):
+    def test_admin_sees_everyone_on_the_team(self):
         self.as_user("admin1")
 
-        usernames = {row["username"] for row in self.client.get(STAFF_URL).data["results"]}
+        rows = self.client.get(STAFF_URL).data["results"]
+        usernames = {row["username"] for row in rows}
 
-        self.assertEqual(usernames, {"admin2", "cashier"})
-        # Not themselves, not the finance lead, not the accountant account.
-        self.assertNotIn("admin1", usernames)
-        self.assertNotIn("boss", usernames)
-        self.assertNotIn("acct", usernames)
+        self.assertEqual(
+            usernames, {"admin1", "admin2", "boss", "cashier", "acct"}
+        )
+        # The directory shows who holds which position, nothing private.
+        boss = next(r for r in rows if r["username"] == "boss")
+        self.assertEqual(boss["position_name"], "Finance lead")
+        self.assertNotIn("salary", " ".join(boss.keys()))
 
-    def test_position_list_says_how_many_positions_are_hidden_from_the_admin(self):
+    def test_admin_sees_every_position_with_its_members(self):
         self.as_user("admin1")
-        data = self.client.get("/api/v1/positions/").data
-        shown = {row["id"] for row in data["results"]}
+        data = self.client.get(POSITIONS_URL).data
+        by_name = {row["name"]: row for row in data["results"]}
 
-        self.assertIn(self.admin_pos.pk, shown)
-        self.assertNotIn(self.boss_pos.pk, shown)
-        total = len(scoped_positions(self.ho))
-        self.assertEqual(data["hidden_count"], total - len(shown))
-        self.assertGreater(data["hidden_count"], 0)
+        self.assertIn("Finance lead", by_name)
+        self.assertEqual(data["hidden_count"], 0)
+        self.assertEqual(
+            {m["username"] for m in by_name["Administration"]["members"]},
+            {"admin1", "admin2"},
+        )
+        self.assertEqual(
+            [m["username"] for m in by_name["Sales counter"]["members"]],
+            ["cashier"],
+        )
+
+    def test_admin_does_not_see_what_a_position_grants(self):
+        self.as_user("admin1")
+        row = self.client.get(f"{POSITIONS_URL}{self.boss_pos.pk}/").data
+
+        self.assertNotIn("permissions", row)
+        self.assertNotIn("granted", row)
+        self.assertEqual(self.client.get(f"{POSITIONS_URL}catalogue/").status_code, 403)
+        self.assertEqual(self.client.get(f"{POSITIONS_URL}presets/").status_code, 403)
+
+    def test_owner_sees_what_a_position_grants_and_its_members(self):
+        self.as_user("owner")
+        row = self.client.get(f"{POSITIONS_URL}{self.boss_pos.pk}/").data
+
+        self.assertIn("finance.view", row["granted"])
+        self.assertTrue(row["permissions"])
+        self.assertEqual([m["username"] for m in row["members"]], ["boss"])
+
+    def test_admin_cannot_open_access_or_documents_of_anyone(self):
+        self.as_user("admin1")
+
+        for suffix in ("access/", "documents/"):
+            url = f"{STAFF_URL}{self.cashier.pk}/{suffix}"
+            self.assertEqual(self.client.get(url).status_code, 403, suffix)
+
+        self.as_user("owner")
+        self.assertEqual(
+            self.client.get(f"{STAFF_URL}{self.cashier.pk}/access/").status_code, 200
+        )
+        self.assertEqual(
+            self.client.get(f"{STAFF_URL}{self.cashier.pk}/documents/").status_code, 200
+        )
 
     def test_owner_sees_every_position_and_none_hidden(self):
         self.as_user("owner")
@@ -203,13 +242,13 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         )
         self.assertEqual(promote.status_code, 400)
 
-    def test_admin_cannot_see_or_touch_more_powerful_staff_or_themselves(self):
+    def test_admin_cannot_change_or_deactivate_anyone(self):
         self.as_user("admin1")
 
-        for target in (self.boss, self.admin, self.accountant):
+        for target in (self.boss, self.admin, self.accountant, self.cashier):
             url = f"{STAFF_URL}{target.pk}/"
-            self.assertEqual(self.client.get(url).status_code, 404, target.username)
-            self.assertIn(self.client.delete(url).status_code, (403, 404), target.username)
+            self.assertEqual(self.client.get(url).status_code, 200, target.username)
+            self.assertEqual(self.client.delete(url).status_code, 403, target.username)
 
         self.assertTrue(User.objects.get(pk=self.boss.pk).is_active)
 
@@ -217,8 +256,10 @@ class TeamDelegationTests(TenantTestMixin, APITestCase):
         self.as_user("admin1")
 
         names = {p["name"] for p in self.client.get(POSITIONS_URL).data["results"]}
-        # Only the ones they could assign.
-        self.assertEqual(names, {"Administration", "Sales counter", "HR viewer"})
+        self.assertEqual(
+            names,
+            {"Administration", "Sales counter", "HR viewer", "Finance lead", "Accounts"},
+        )
 
         created = self.client.post(POSITIONS_URL, {"name": "Sneaky"}, format="json")
         self.assertEqual(created.status_code, 403)

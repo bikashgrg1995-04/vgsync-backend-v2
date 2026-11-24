@@ -11,7 +11,7 @@ like every other API.
 """
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -34,7 +34,7 @@ from .manage_serializers import (
     generate_temporary_password,
 )
 from .models import PositionPermission, StaffPermissionOverride, User
-from .scope import manageable_position_ids, scoped_positions, scoped_users
+from .scope import scoped_positions, scoped_users
 from .tokens import revoke_all_refresh_tokens
 
 
@@ -64,10 +64,11 @@ class StaffViewSet(viewsets.ModelViewSet):
         # Creating, editing, deactivating, reactivating and resetting the password of
         # staff, and changing anyone's permissions, is reserved for the owner. Everyone
         # else with staff access (a delegated administrator) can only read.
-        # Documents keep their own rules.
+        # Access & permissions and documents are private to the owner, for
+        # reading too.
         if (
             self.request.method not in ("GET", "HEAD", "OPTIONS")
-            and self.action not in ("documents", "document")
+            or self.action in ("access", "documents", "document")
         ):
             return [IsOwner()]
 
@@ -87,21 +88,10 @@ class StaffViewSet(viewsets.ModelViewSet):
         if user.role == User.Role.OWNER:
             return queryset
 
-        # A delegated administrator manages staff accounts only: not
-        # themselves, and not anyone with more access than they have.
-        allowed = manageable_position_ids(user, business)
-
-        return (
-            queryset
-            .filter(role=User.Role.STAFF)
-            .exclude(pk=user.pk)
-            .filter(Q(position_id__in=allowed) | Q(position__isnull=True))
-            .exclude(
-                extra_positions__in=scoped_positions(business).exclude(
-                    pk__in=allowed
-                )
-            )
-        )
+        # Everyone with staff access may see who is on the team and which
+        # position each person holds. Pay, attendance, documents and access
+        # stay with the owner.
+        return queryset.filter(role=User.Role.STAFF)
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -344,9 +334,13 @@ class PositionViewSet(viewsets.ModelViewSet):
     serializer_class = PositionSerializer
 
     def get_permissions(self):
-        # Reading is shared with delegated administrators (they need the list
-        # to see positions); creating and changing positions is the owner's alone.
+        # Everyone with staff access may read the list of positions and who
+        # holds each. What a position grants, and the editing tools, are the
+        # owner's alone.
         if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            if self.action in ("presets", "catalogue"):
+                return [IsOwner()]
+
             return [CanManageTeam()]
 
         return [IsOwner()]
@@ -362,13 +356,15 @@ class PositionViewSet(viewsets.ModelViewSet):
 
         queryset = scoped_positions(business)
 
-        if user.role != User.Role.OWNER:
-            # Only positions they could assign anyway.
-            queryset = queryset.filter(
-                pk__in=manageable_position_ids(user, business)
-            )
+        active = User.objects.filter(is_active=True).order_by(
+            "first_name", "username"
+        )
 
-        return queryset.prefetch_related("permissions").annotate(
+        return queryset.prefetch_related(
+            "permissions",
+            Prefetch("users", queryset=active, to_attr="active_primary"),
+            Prefetch("extra_users", queryset=active, to_attr="active_extra"),
+        ).annotate(
             staff_count=Count(
                 "users", filter=Q(users__is_active=True), distinct=True
             )
@@ -380,16 +376,9 @@ class PositionViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
 
-        # Tell a delegated administrator how many positions of this business are not
-        # shown because they grant more access than their own, so a missing position
-        # is explained rather than mysterious. The owner sees everything: always 0.
-        hidden = 0
-        if request.user.role != User.Role.OWNER:
-            total = scoped_positions(request.active_business).count()
-            shown = len(manageable_position_ids(request.user, request.active_business))
-            hidden = max(total - shown, 0)
+        # Every position is shown to everyone, so nothing is ever hidden.
         if isinstance(response.data, dict):
-            response.data["hidden_count"] = hidden
+            response.data["hidden_count"] = 0
 
         return response
 
