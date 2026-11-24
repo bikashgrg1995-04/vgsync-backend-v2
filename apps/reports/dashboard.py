@@ -9,7 +9,6 @@ from decimal import Decimal
 from django.db.models import F, Sum
 
 from apps.accounts.models import User
-from apps.approvals.models import ApprovalRequest
 from apps.businesses.models import Business
 from apps.finance.models import Expense, Income
 from apps.inventory.models import StockBalance
@@ -147,9 +146,6 @@ def owner_dashboard(business, user, access_mode, today=None, days=30):
     pnl = queries.profit_and_loss(business, month_start, today)
     trend = queries.sales_trend(business, since, today, "day")
     low = _low_stock(business)
-    pending = ApprovalRequest.objects.filter(
-        business=business, status=ApprovalRequest.Status.PENDING
-    ).count()
 
     alerts = []
 
@@ -163,12 +159,6 @@ def owner_dashboard(business, user, access_mode, today=None, days=30):
         alerts.append({
             "kind": "overdue_receivables", "severity": "danger",
             "message": "Customers owe money older than 90 days.",
-        })
-
-    if pending:
-        alerts.append({
-            "kind": "approvals", "severity": "info",
-            "message": f"{pending} requests are waiting for approval.",
         })
 
     data = {
@@ -198,7 +188,6 @@ def owner_dashboard(business, user, access_mode, today=None, days=30):
             business, month_start, today, 5, "value"
         )["products"],
         "low_stock": low,
-        "approvals_pending": pending,
         "staff": _staff(business),
         "alerts": alerts,
         "overview": overview.period_overview(business, today, days),

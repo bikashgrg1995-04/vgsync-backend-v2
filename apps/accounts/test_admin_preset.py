@@ -7,7 +7,6 @@ from apps.accounts.models import User
 from apps.common.testing import TenantTestMixin
 
 AUDIT = "/api/v1/audit/"
-RULES = "/api/v1/approvals/rules/"
 POSITIONS = "/api/v1/positions/"
 BUSINESSES = "/api/v1/businesses/"
 SALARIES = "/api/v1/payroll/salaries/"
@@ -31,17 +30,17 @@ class AdministratorTests(TenantTestMixin, APITestCase):
         codes = rbac.preset_codes("administrator")
 
         for code in (
-            "staff.view_audit", "staff.manage_positions", "finance.manage_rules",
+            "staff.view_audit", "staff.manage_positions",
         ):
             self.assertIn(code, codes)
 
         self.assertNotIn("staff.pay_view", codes)
         self.assertNotIn("staff.manage_permissions", codes)
 
-    def test_admin_reads_audit_and_rules(self):
+    def test_admin_reads_audit(self):
         self.authenticate("ACME-HO", "adm")
 
-        for url in (AUDIT, RULES):
+        for url in (AUDIT,):
             self.assertEqual(self.client.get(url).status_code, 200, url)
 
     def test_admin_still_cannot_see_salaries(self):
@@ -52,7 +51,7 @@ class AdministratorTests(TenantTestMixin, APITestCase):
     def test_plain_staff_cannot_use_them(self):
         self.authenticate("ACME-HO", "plain")
 
-        for url in (AUDIT, RULES):
+        for url in (AUDIT,):
             self.assertEqual(self.client.get(url).status_code, 403, url)
 
     def test_admin_cannot_create_positions_only_the_owner_can(self):
@@ -83,8 +82,3 @@ class AdministratorTests(TenantTestMixin, APITestCase):
             403,
         )
 
-    def test_admin_can_set_an_approval_rule(self):
-        self.authenticate("ACME-HO", "adm")
-        listing = self.client.get(RULES)
-
-        self.assertEqual(listing.status_code, 200)

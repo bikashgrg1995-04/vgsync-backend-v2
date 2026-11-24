@@ -4,7 +4,6 @@ from rest_framework.test import APITestCase
 
 from apps.accounts import rbac
 from apps.accounts.models import User
-from apps.approvals.models import ApprovalRequest, Kind
 from apps.common.testing import TenantTestMixin
 from apps.finance.models import Expense, Income
 
@@ -82,18 +81,6 @@ class DashboardTests(TenantTestMixin, APITestCase):
 
         # 1000 was before the opening date, so it is already inside the 5000.
         self.assertEqual((data["cash"], data["other"], data["total"]), ("5300.00", "40.00", "5340.00"))
-
-    def test_pending_approvals_raise_an_alert(self):
-        ApprovalRequest.objects.create(
-            business=self.ho, kind=Kind.EXPENSE, amount="5000",
-            payload_hash="x", created_by=self.owner,
-        )
-        self.authenticate("ACME-HO", "owner")
-
-        data = self.client.get(URL).data
-
-        self.assertEqual(data["approvals_pending"], 1)
-        self.assertEqual(data["alerts"][0]["kind"], "approvals")
 
     def test_head_office_sees_branches_but_a_branch_does_not(self):
         self.authenticate("ACME-HO", "owner")

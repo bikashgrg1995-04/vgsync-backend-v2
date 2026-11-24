@@ -54,6 +54,11 @@ def needs_approval(business, kind, amount):
 def gate(request, kind, amount, summary=""):
     """Hold or release the operation in ``request``. Returns the used approval
     (or None when no approval was needed)."""
+    # The approval step has been switched off: nothing is ever held. Approval
+    # is arranged in person, outside the system. The rest of this module is kept
+    # unused so that nothing stored is lost.
+    return None
+
     user = request.user
     business = request.active_business
 

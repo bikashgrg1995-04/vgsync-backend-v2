@@ -37,7 +37,6 @@ CATALOG = {
         "adjust": "Adjust stock",
         "write_off": "Write off stock",
         "transfer": "Transfer stock between branches",
-        "approve": "Approve stock adjustments",
     },
     "purchases": {
         "view": "View purchases",
@@ -47,7 +46,6 @@ CATALOG = {
         "receive": "Receive goods",
         "pay": "Pay suppliers",
         "return": "Return goods",
-        "approve": "Approve high-value purchases",
     },
     "sales": {
         "view": "View sales",
@@ -57,7 +55,6 @@ CATALOG = {
         "cancel": "Cancel sales",
         "discount": "Give discounts",
         "refund": "Refund customers",
-        "approve": "Approve exceptional sales",
         "collect": "Record customer and company payments",
         "view_all": "See everyone's sales, not only your own",
         "followup": "Work follow-ups: record calls and visits, skip them",
@@ -80,8 +77,6 @@ CATALOG = {
         "update": "Edit income and expenses",
         "delete": "Delete income and expenses",
         "void": "Void income and expenses",
-        "approve": "Approve high-value expenses",
-        "manage_rules": "Set approval limits",
         "reconcile": "Reconcile cash and bank, set opening balances",
     },
     "reports": {
