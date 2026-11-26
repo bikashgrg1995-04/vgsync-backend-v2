@@ -57,6 +57,14 @@ class PayAtCreationTests(StaffManagementTestCase):
         self.assertEqual(profile.pay_type, "daily")
         self.assertEqual(profile.rate, 900)
 
+    def test_daily_staff_needs_no_wage_when_created(self):
+        response = self.create_staff(pay={"pay_type": "daily"})
+
+        self.assertEqual(response.status_code, 201, response.data)
+        profile = User.objects.get(pk=response.data["id"]).salary_profile
+        self.assertEqual(profile.pay_type, "daily")
+        self.assertIsNone(profile.rate)
+
     def test_monthly_pay_needs_a_salary(self):
         response = self.create_staff(pay={"pay_type": "monthly"})
 
