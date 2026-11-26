@@ -9,11 +9,14 @@ scope. Passwords and tokens are never written.
 import csv
 import io
 import json
+import logging
 import zipfile
 from datetime import datetime, timezone
 
 from django.apps import apps as django_apps
 from django.db import models
+
+logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
 SKIP_APPS = {"contenttypes", "sessions", "admin", "auth", "backups"}
@@ -397,6 +400,7 @@ def apply_restore(user, business, data):
             with connection.cursor() as cursor:
                 cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
     except IntegrityError:
+        logger.exception("Restore refused by the database")
         raise RestoreError(
             "Some records made after this backup depend on newer data, so it "
             "cannot be restored over them. Nothing was changed."
